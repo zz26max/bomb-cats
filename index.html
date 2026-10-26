@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="description" content="炸弹猫 · 单机版卡牌对战小游戏">
+<title>炸弹猫 · 单机版</title>
+<link rel="icon" type="image/png" sizes="32x32" href="assets/brand/favicon-32.png">
+<link rel="apple-touch-icon" href="assets/brand/icon-180.png">
+<link rel="stylesheet" href="styles/main.css">
+</head>
+<body>
+
+<!-- ICON_SPRITE_START (由 tools/build-icons.js 生成，请勿手改) -->
+<svg id="icon-sprite" width="0" height="0" aria-hidden="true" style="position:absolute">
+  <symbol id="discard-empty" viewBox="0 0 74 100" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="70" height="96" rx="10" stroke-dasharray="5 5"/><path d="M15 70q8-20 22 0 14-20 22 0M23 53l-4-15 13 8M51 46l13-8-4 15M30 58h2m10 0h2"/></symbol>
+  <symbol id="ic-bomb" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="14" r="7"/><path d="M15 8l3-4 3 1M19 2v3M21 4l2-2"/></symbol>
+  <symbol id="ic-close" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 5l14 14M19 5L5 19"/></symbol>
+  <symbol id="ic-endturn" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12h15M14 7l5 5-5 5M4 5v14"/></symbol>
+  <symbol id="ic-hint" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18h6M10 21h4M8 14c-2-2-3-3-3-6a7 7 0 0 1 14 0c0 3-1 4-3 6l-1 2H9z"/></symbol>
+  <symbol id="ic-log" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3h14v18H5zM9 8h6M9 12h6M9 16h4"/></symbol>
+  <symbol id="ic-restart" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 1 0-2 6M20 4v7h-7"/></symbol>
+  <symbol id="ic-sound-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 10h4l5-4v12l-5-4H4zM17 9l5 6M22 9l-5 6"/></symbol>
+  <symbol id="ic-sound-on" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 10h4l5-4v12l-5-4H4z"/><path d="M17 9c2 2 2 4 0 6M20 6c4 4 4 8 0 12"/></symbol>
+</svg>
+<!-- ICON_SPRITE_END -->
+
+
+<div class="app">
+
+  <!-- ============ 顶栏 ============ -->
+  <header class="topbar">
+    <div class="brand">
+      <img class="brand-cn" src="assets/brand/logo-cn.svg" alt="炸弹猫">
+      <img class="brand-en" src="assets/brand/logo-en.svg" alt="Exploding Cats">
+    </div>
+    <div class="spacer"></div>
+
+    <div class="deck-info">
+      <span>牌堆 <b id="deckCount">0</b></span>
+      <span class="bomb-mark" id="bombCount" title="本局牌堆里的炸弹猫总数"><svg class="ic" aria-hidden="true"><use href="#ic-bomb"></use></svg><b id="bombTotal">0</b></span>
+      <span>回合 <b id="seedLabel">0</b></span>
+    </div>
+
+    <button class="btn icon" id="btnSound" title="音效开关"><svg class="ic" aria-hidden="true"><use href="#ic-sound-on"></use></svg></button>
+    <button class="btn small icon-text" id="btnRestart" title="重开一局"><svg class="ic" aria-hidden="true"><use href="#ic-restart"></use></svg><span>重开</span></button>
+  </header>
+
+  <!-- ============ 牌桌 ============ -->
+  <main class="table">
+
+    <!-- 对手区 -->
+    <section class="opponents" id="opponents"></section>
+
+    <!-- 中央舞台 -->
+    <section class="stage">
+      <div class="piles">
+        <!-- 牌堆 -->
+        <div class="pile">
+          <div class="pile-stack" id="pileStack">
+            <div class="layer" style="transform:translate(3px,3px)"></div>
+            <div class="layer" style="transform:translate(2px,2px)"></div>
+            <div class="layer" style="transform:translate(1px,1px)"></div>
+            <div class="layer">
+              <span class="badge-num"></span>
+            </div>
+          </div>
+          <span class="label">牌堆</span>
+        </div>
+
+        <!-- 弃牌堆 -->
+        <div class="pile">
+          <div class="discard-top" id="discardTop">—</div>
+          <span class="label">弃牌</span>
+        </div>
+      </div>
+
+      <!-- 抽牌提示：抽到什么牌直接摊在台面上 -->
+      <div class="draw-flash" id="drawFlash">
+        <span class="label">你抽到了</span>
+        <div class="card-slot" id="drawFlashCard"></div>
+      </div>
+
+      <div class="prompt" id="prompt">准备开始…</div>
+
+      <!-- 「预测未来」浮层 -->
+      <div class="peek-panel" id="peekPanel">
+        <div class="title">预测未来 · 牌堆顶 3 张</div>
+        <div class="cards" id="peekCards"></div>
+        <div class="hint">点击任意处关闭</div>
+      </div>
+
+      <!-- 中央飘字 -->
+      <div class="floater" id="floater"></div>
+    </section>
+
+    <!-- 手牌与操作 -->
+    <section class="handzone">
+      <div class="myplate" id="myPlate">
+        <img class="plate-cat" src="assets/cats/cat-01.webp" alt="">
+        <span class="nm">你</span>
+        <span class="tag">等待中</span>
+      </div>
+      <div class="hand" id="hand"></div>
+      <div class="actions">
+        <span class="hand-count" id="handCount">0 张</span>
+        <button class="btn icon-text" id="btnHint"><svg class="ic" aria-hidden="true"><use href="#ic-hint"></use></svg><span>提示</span></button>
+        <button class="btn primary icon-text" id="btnEnd"><svg class="ic" aria-hidden="true"><use href="#ic-endturn"></use></svg><span>结束回合 · 抽牌</span></button>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<!-- ============ 日志面板 ============ -->
+<aside class="logpanel" id="logPanel">
+  <div class="head">
+    <span>对局日志</span>
+    <span class="spacer"></span>
+    <button id="btnLog" title="收起"><svg class="ic" aria-hidden="true"><use href="#ic-close"></use></svg></button>
+  </div>
+  <div class="loglist" id="logList"></div>
+</aside>
+<button class="btn log-toggle icon-text" id="btnLogToggle" style="display:none"><svg class="ic" aria-hidden="true"><use href="#ic-log"></use></svg><span>日志</span></button>
+
+<!-- ============ 开局设置 ============ -->
+<div class="modal-mask" id="modalSetup">
+  <div class="modal">
+    <img class="modal-banner" src="assets/art/banner.webp" alt="炸弹猫">
+    <p class="sub">轮流出牌、抽牌，抽到炸弹猫又没有「拆除」就出局。活到最后的人获胜。</p>
+
+    <div class="field">
+      <label>玩家人数</label>
+      <div class="segmented" id="setupPlayers" data-value="4">
+        <button data-v="2">2 人</button>
+        <button data-v="3">3 人</button>
+        <button data-v="4" class="on">4 人</button>
+        <button data-v="5">5 人</button>
+      </div>
+    </div>
+
+    <div class="field">
+      <label>AI 难度</label>
+      <div class="segmented" id="setupDiff">
+        <button data-v="easy">轻松</button>
+        <button data-v="normal" class="on">普通</button>
+        <button data-v="hard">困难</button>
+      </div>
+      <p class="diff-hint" id="diffHint">偶尔看牌、偶尔躲避，但经常判断失误，大致势均力敌。</p>
+    </div>
+
+    <div class="field">
+      <label>玩家名单</label>
+      <div class="names" id="names"></div>
+    </div>
+
+    <details class="rules">
+      <summary>怎么看懂这局牌</summary>
+      <div class="body">
+        <b>回合流程</b>：出任意张牌 → 点击牌堆（或按空格）→ 必须抽 1 张。<br>
+        <b>炸弹猫</b>：抽到它，手上有 <code>拆除</code> 就能活，否则出局。<br>
+        <b>预测未来</b>：看牌堆顶 3 张，能提前知道要不要躲。<br>
+        <b>攻击</b>：让下家连抽 2 张，是逼人送命的主力。<br>
+        <b>跳过</b>：这回合不抽牌，风险高时的保命牌。<br>
+        <b>求饶 / 帮忙</b>：从对手手里抢一张牌，但对方只剩 1 张时不能抢。<br>
+        <b>否决</b>：取消上一张打出的牌。<br>
+        <b>洗牌</b>：重洗牌堆，会把自己记住的顶牌信息一并洗掉。
+      </div>
+    </details>
+
+    <div class="modal-actions" style="margin-top:18px">
+      <button class="btn primary" id="btnStart" style="flex:1">开始对局</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 结算 ============ -->
+<div class="modal-mask" id="modalResult">
+  <div class="modal">
+    <img class="result-art" id="resultArt" src="assets/art/win.webp" alt="">
+    <div class="result-title win" id="resultTitle">你是最后的赢家！</div>
+    <p class="result-sub" id="resultSub"></p>
+
+    <div class="result-stats">
+      <div class="stat"><div class="v" id="statTurns">0</div><div class="k">回合</div></div>
+      <div class="stat"><div class="v" id="statPlayed">0</div><div class="k">出牌</div></div>
+      <div class="stat"><div class="v" id="statTime">0s</div><div class="k">用时</div></div>
+    </div>
+
+    <div class="modal-actions">
+      <button class="btn primary icon-text" id="btnAgain"><svg class="ic" aria-hidden="true"><use href="#ic-restart"></use></svg><span>再来一局</span></button>
+    </div>
+  </div>
+</div>
+
+<!-- 特效层 -->
+<canvas id="fx"></canvas>
+<div class="screen-flash" id="flash"></div>
+
+<!-- ============ 脚本（按依赖顺序加载） ============ -->
+<script src="src/core/cards.js"></script>
+<script src="src/core/rng.js"></script>
+<script src="src/core/engine.js"></script>
+<script src="src/ai/ai.js"></script>
+<script src="src/ui/audio.js"></script>
+<script src="src/ui/view.js"></script>
+<script src="src/main.js"></script>
+
+</body>
+</html>
