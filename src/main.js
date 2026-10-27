@@ -19,6 +19,8 @@
     humanId: 0,          // 真人座位；-1 表示纯观战
     difficulty: 'normal',
     selectedUid: null,   // 当前选中的手牌
+    selectedAt: 0,       // 最近一次触摸选中的时间戳（≥300ms 后再点同一张才算确认出牌）
+    input: 'mouse',      // 输入类型：只认 pointerdown 记下的 pointerType（mouse / touch）
     newUid: null,        // 刚抽到的那张牌，用于在手牌里高亮
     incomingUid: null,   // 正从牌堆飞向手牌、还没落地的那张（先隐形占位）
     lastDrawn: null,     // 最近一次抽到的牌（供界面/调试回溯）
@@ -53,6 +55,15 @@
     if (!App.G) return;
     const state = Engine.getState(App.G);
     const myId = App.humanId;
+
+    // 选中失效：牌已不在手牌里（被抢 / 被弃 / 换局），清掉免得下次误判
+    if (App.selectedUid != null) {
+      const me = state.players[myId];
+      if (!me || !me.hand.some(c => c.uid === App.selectedUid)) {
+        App.selectedUid = null;
+        App.awaitingTarget = false;
+      }
+    }
 
     // 放炸弹预览的退出兜底：状态里已经没有待放回的炸弹就收掉监听器与横线
     // （对局结束 / 状态被外部推进 / 读档等都不经过点击路径）
@@ -92,7 +103,7 @@
       View.setPrompt(win ? '<b>🎉 你赢了！</b>' : '<b>' + state.players[state.winner].name + '</b> 获胜', false);
     } else if (state.pendingBomb) {
       if (state.pendingBomb.player === myId) {
-        View.setPrompt(PLACE_PROMPT, true);
+        View.setPrompt(placePrompt(), true);
       } else {
         View.setPrompt('<b>' + state.players[state.pendingBomb.player].name + '</b> 正在放置炸弹…', false);
       }
@@ -104,6 +115,10 @@
     } else {
       View.setPrompt('<b>' + state.players[state.current].name + '</b> 的回合…', false);
     }
+
+    // 触摸端：说明条 / 目标栏 / 放置条跟着状态走（桌面端两者都不显示）
+    refreshPlaceBar();
+    renderInspect();
   }
 
   /* ---------------- 飞牌辅助 ---------------- */
@@ -423,12 +438,21 @@
   /* ---------------- 炸弹放回 ---------------- */
 
   const PLACE_PROMPT = '<b>💣 炸弹放回哪里？</b>点击牌堆任意高度决定位置';
+  // 触摸 / 窄屏：点牌堆只移动预览、不提交，文案必须改成「点放回这里」
+  const PLACE_PROMPT_TOUCH = '<b>💣 炸弹放回哪里？</b>选好位置后点「放回这里」';
+
+  /** 当前该用哪套放置提示（鼠标桌面保持原文案逐字不变） */
+  function placePrompt() {
+    return (App.input === 'touch' || (root.innerWidth || 0) <= 620) ? PLACE_PROMPT_TOUCH : PLACE_PROMPT;
+  }
 
   /** 当前挂着的放炸弹监听器清理函数（防重入 + 所有退出路径共用） */
   let bombPlaceCleanup = null;
 
   /** 收掉放炸弹监听器与预览（点击完成 / 对局结束 / 重开 / 状态被外部推进） */
   function clearBombPlacement() {
+    // 放置条与选中档位跟着一起收（任何退出路径都不残留）
+    hidePlaceBar();
     if (!bombPlaceCleanup) return;
     const fn = bombPlaceCleanup;
     bombPlaceCleanup = null;
@@ -462,7 +486,7 @@
     if (!G.pendingBomb) return;
 
     if (G.pendingBomb.player === App.humanId) {
-      View.setPrompt(PLACE_PROMPT, true);
+      View.setPrompt(placePrompt(), true);
       enableBombPlacement();
       return;
     }
@@ -497,23 +521,28 @@
       const pos = posFromEvent(ev);
       const deckSize = G.deck.length;
       View.showPlaceMarker(ratio, pos, deckSize);
-      View.setPrompt(PLACE_PROMPT + '（当前：' + View.placeMarkerText(pos, deckSize) + '）', true);
+      View.setPrompt(placePrompt() + '（当前：' + View.placeMarkerText(pos, deckSize) + '）', true);
     };
 
     const onLeave = () => {
       View.hidePlaceMarker();
-      View.setPrompt(PLACE_PROMPT, true);
+      View.setPrompt(placePrompt(), true);
     };
 
     const onClick = async (ev) => {
       const pos = posFromEvent(ev);
-      cleanup();
-      const r = Engine.placeBomb(App.G, App.humanId, pos);
-      if (r.ok) {
-        View.floater('🗨️ 炸弹已放回', 'var(--red-2)');
-        await playEvents(r.events);
+      if (App.input === 'touch') {
+        // 触摸：点牌堆只把预览移到点击高度对应的档位，不提交（提交走放置条的确认按钮）
+        const G = App.G;
+        if (!G) return;
+        placePos = pos;
+        const deck = G.deck.length;
+        const ratio = Math.max(0, Math.min(1, placePos / Math.max(1, Math.min(deck, 12))));
+        View.showPlaceMarker(ratio, placePos, deck);
+        refreshPlaceBar();
+        return;
       }
-      await afterPlacement();
+      await commitPlacement(pos);
     };
 
     const cleanup = () => {
@@ -525,6 +554,7 @@
       stack.removeEventListener('pointerdown', onMove);
       stack.removeEventListener('pointerleave', onLeave);
       View.hidePlaceMarker();
+      hidePlaceBar();
       if (bombPlaceCleanup === cleanup) bombPlaceCleanup = null;
       // 不在这里恢复 .can-draw：交给下一次 render() 按真实状态重新算
     };
@@ -535,6 +565,7 @@
     stack.addEventListener('pointerdown', onMove);   // 触摸没有 hover，按下就先显示
     stack.addEventListener('pointerleave', onLeave);
     bombPlaceCleanup = cleanup;
+    refreshPlaceBar();                               // 放置条按当前状态立即出现（触摸 / 窄屏）
   }
 
   /** 炸弹放回之后的收尾：判断是否需要恢复暂停的回合 */
@@ -549,6 +580,266 @@
     render();
     await checkGameOver();
     scheduleAIIfNeeded();
+  }
+
+  /* ---------------- 触摸说明条 #inspect / 炸弹放回位置条 #placeBar ---------------- */
+
+  /** 弃牌堆顶的只读说明（触摸点弃牌堆时用；关闭 / 选中手牌时清掉） */
+  let discardInspect = null;
+  /** 说明条当前展示的数据（主按钮点击时复用） */
+  let inspectInfo = null;
+  /** 放置条当前选中的插入位置（null = 未选） */
+  let placePos = null;
+
+  /** 说明条要展示的牌信息：选中的手牌优先，其次弃牌堆顶 */
+  function inspectCardInfo() {
+    const G = App.G;
+    if (!G) return null;
+    if (App.selectedUid != null) {
+      const state = Engine.getState(G);
+      const me = state.players[App.humanId];
+      const card = me && me.hand ? me.hand.find(c => c.uid === App.selectedUid) : null;
+      if (!card) return null;
+      const lm = Engine.legalMoves(G, App.humanId);
+      const canPlay = lm.playable.some(m => m.cardUid === card.uid);
+      const need = lm.needTarget.find(m => m.cardUid === card.uid);
+      return { card, canPlay, needTarget: !!need, targets: need ? need.targets : null, readonly: false };
+    }
+    if (discardInspect) return { card: discardInspect, canPlay: false, needTarget: false, targets: null, readonly: true };
+    return null;
+  }
+
+  function removeTargetButtons(el) {
+    Array.from(el.children || []).forEach(c => {
+      if (c.classList && c.classList.contains('i-target')) el.removeChild(c);
+    });
+  }
+
+  /** 目标栏：取消 + 每个可选对手一个按钮（点击直接结算） */
+  function renderTargetButtons(el, targets, state) {
+    removeTargetButtons(el);
+    const cancel = document.createElement('button');
+    cancel.type = 'button';
+    cancel.className = 'i-cancel';
+    cancel.textContent = '取消';
+    cancel.addEventListener('click', ev => {
+      if (ev && ev.stopPropagation) ev.stopPropagation();
+      closeInspect();
+    });
+    el.appendChild(cancel);
+    (targets || []).forEach(pid => {
+      const p = state.players[pid];
+      if (!p) return;
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'i-target';
+      b.dataset.pid = String(pid);
+      const img = document.createElement('img');
+      img.className = 't-cat';
+      img.alt = '';
+      img.src = View.catArt(pid, p.alive);
+      const col = document.createElement('span');
+      col.className = 't-col';
+      const nm = document.createElement('span');
+      nm.className = 't-name';
+      nm.textContent = p.name;
+      const cnt = document.createElement('span');
+      cnt.className = 't-count';
+      cnt.textContent = p.handSize + ' 张';
+      col.appendChild(nm);
+      col.appendChild(cnt);
+      b.appendChild(img);
+      b.appendChild(col);
+      b.addEventListener('click', ev => {
+        if (ev && ev.stopPropagation) ev.stopPropagation();
+        humanPickTarget(pid);
+      });
+      el.appendChild(b);
+    });
+  }
+
+  /** 说明条 / 目标栏：触摸端选中牌、弃牌堆顶或等待目标时显示；桌面恒不显示 */
+  function renderInspect() {
+    const el = $('inspect');
+    if (!el) return;
+    const G = App.G;
+    const stage = document.querySelector('.stage');
+    const touch = App.input === 'touch';
+    let mode = null;
+    inspectInfo = null;
+
+    if (touch && G && App.selectedUid != null) {
+      const info = inspectCardInfo();
+      if (info) {
+        inspectInfo = info;
+        mode = (App.awaitingTarget && info.needTarget) ? 'target' : 'card';
+      }
+    } else if (touch && G && discardInspect) {
+      inspectInfo = inspectCardInfo();
+      mode = inspectInfo ? 'card' : null;
+    }
+
+    const show = !!mode;
+    el.classList.toggle('show', show);
+    el.classList.toggle('targeting', mode === 'target');
+    if (stage) stage.classList.toggle('inspecting', show);
+
+    if (!show) {
+      removeTargetButtons(el);
+      return;
+    }
+
+    if (mode === 'target') {
+      renderTargetButtons(el, inspectInfo.targets, Engine.getState(G));
+      return;
+    }
+
+    removeTargetButtons(el);
+    const def = CARDS[inspectInfo.card.type] || {};
+    const nameEl = el.querySelector('.i-name');
+    const textEl = el.querySelector('.i-text');
+    const goEl = el.querySelector('.i-go');
+    if (nameEl) nameEl.textContent = def.name || inspectInfo.card.name || '';
+    if (textEl) textEl.textContent = def.text || '';
+    if (goEl) {
+      const readonly = !!inspectInfo.readonly;
+      const myTurn = !!(G && G.current === App.humanId && G.phase === 'playing');
+      goEl.style.display = readonly ? 'none' : '';
+      if (readonly) {
+        goEl.disabled = true;
+        goEl.textContent = '出牌';
+      } else if (inspectInfo.needTarget) {
+        goEl.disabled = false;
+        goEl.textContent = '选目标';
+      } else if (inspectInfo.canPlay) {
+        goEl.disabled = false;
+        goEl.textContent = '出牌';
+      } else {
+        goEl.disabled = true;
+        goEl.textContent = myTurn ? '现在不能出' : '还没轮到你';
+      }
+    }
+  }
+
+  /** 关闭说明条：清掉选中与弃牌堆说明 */
+  function closeInspect() {
+    discardInspect = null;
+    App.selectedUid = null;
+    App.awaitingTarget = false;
+    renderInspect();
+    render();
+  }
+
+  /** 放置条的各部件（按 class 取，测试桩也能用） */
+  function placeBarParts() {
+    const bar = $('placeBar');
+    if (!bar) return null;
+    let title = null, ok = null;
+    const slots = [];
+    Array.from(bar.children || []).forEach(c => {
+      if (!c.classList) return;
+      if (c.classList.contains('pb-title')) title = c;
+      else if (c.classList.contains('pb-ok')) ok = c;
+      else if (c.classList.contains('pb-grid')) {
+        Array.from(c.children || []).forEach(s => {
+          if (s.classList && s.classList.contains('pb-slot')) slots.push(s);
+        });
+      }
+    });
+    slots.sort((a, b) => (parseInt(a.dataset.slot, 10) || 0) - (parseInt(b.dataset.slot, 10) || 0));
+    return { bar, title, ok, slots };
+  }
+
+  /** 档位 → 插入位置：第 k 张 = k-1；最底部 = deck.length */
+  function slotToPos(slot, deck) {
+    return slot >= 6 ? deck : slot - 1;
+  }
+
+  /** 放置条显示条件：真人待放炸弹 + (触摸 或 窄屏) */
+  function placeBarWanted() {
+    const G = App.G;
+    if (!G || !G.pendingBomb || G.pendingBomb.player !== App.humanId) return false;
+    return App.input === 'touch' || (root.innerWidth || 0) <= 620;
+  }
+
+  /** 隐藏放置条并清空选中档位（所有退出路径共用） */
+  function hidePlaceBar() {
+    placePos = null;
+    const parts = placeBarParts();
+    if (parts) parts.bar.classList.remove('show');
+  }
+
+  /** 刷新放置条：显示/隐藏、档位 disabled、标题、确认按钮文案 */
+  function refreshPlaceBar() {
+    const parts = placeBarParts();
+    if (!parts) return;
+    const on = placeBarWanted();
+    parts.bar.classList.toggle('show', on);
+    if (!on) { placePos = null; return; }
+    const G = App.G;
+    const deck = G.deck.length;
+    parts.slots.forEach(btn => {
+      const slot = parseInt(btn.dataset.slot, 10);
+      let enabled;
+      if (deck === 0) enabled = slot === 1;
+      else if (slot >= 6) enabled = true;
+      else enabled = slot <= deck;
+      btn.disabled = !enabled;
+      btn.classList.toggle('on', placePos != null && slotToPos(slot, deck) === placePos);
+    });
+    if (parts.title) {
+      let t = '炸弹放回哪里？';
+      if (deck === 0) t += '牌堆已空，炸弹会放回原位';
+      else if (placePos != null) t += '（当前：' + View.placeMarkerText(placePos, deck) + '）';
+      parts.title.textContent = t;
+    }
+    if (parts.ok) {
+      const sel = placePos != null;
+      parts.ok.disabled = !sel;
+      if (!sel) parts.ok.textContent = '请选择位置';
+      else if (placePos === 0) parts.ok.textContent = '放回这里（第 1 张）';
+      else if (placePos >= deck) parts.ok.textContent = '放回这里（最底部）';
+      else parts.ok.textContent = '放回这里（第 ' + (placePos + 1) + ' 张）';
+    }
+  }
+
+  /** 提交炸弹放置（鼠标点牌堆 / 放置条确认共用） */
+  async function commitPlacement(pos) {
+    clearBombPlacement();
+    const r = Engine.placeBomb(App.G, App.humanId, pos);
+    if (r.ok) {
+      View.floater('🗨️ 炸弹已放回', 'var(--red-2)');
+      await playEvents(r.events);
+    }
+    await afterPlacement();
+  }
+
+  /* ---------------- 手机端日志抽屉（桌面仍用右下角浮层面板） ---------------- */
+
+  let logDrawerOpen = false;
+
+  /** 打开日志抽屉：复用现有 .logpanel 的 DOM 与渲染（只是换个摆放方式） */
+  function openLogDrawer() {
+    const panel = $('logPanel');
+    const mask = $('logMask');
+    if (!panel || !mask) return;
+    logDrawerOpen = true;
+    panel.classList.remove('hidden');
+    panel.classList.add('drawer', 'show');
+    mask.classList.add('show');
+  }
+
+  /** 关闭日志抽屉：滑出动画结束后再摘掉 drawer 类（否则会瞬间跳回桌面浮层样式） */
+  function closeLogDrawer() {
+    const panel = $('logPanel');
+    const mask = $('logMask');
+    logDrawerOpen = false;
+    if (mask) mask.classList.remove('show');
+    if (!panel) return;
+    panel.classList.remove('show');
+    setTimeout(() => {
+      if (!logDrawerOpen) panel.classList.remove('drawer');
+    }, 260);
   }
 
   /* ---------------- AI 驱动 ---------------- */
@@ -724,6 +1015,7 @@
 
     App.humanId = 0;
     App.selectedUid = null;
+    App.selectedAt = 0;
     App.newUid = null;
     App.incomingUid = null;
     App.lastDrawn = null;
@@ -731,6 +1023,8 @@
     App.busy = false;
     App.stats = { turns: 0, drawn: 0, played: 0, startAt: Date.now() };
     overShown = false;
+    discardInspect = null;      // 弃牌堆说明是只读的临时状态，换局清掉
+    hidePlaceBar();             // 放置条（clearBombPlacement 里也会收一次，这里兜底）
     // 重开时收掉可能还挂着的放炸弹监听器与预览
     clearBombPlacement();
 
@@ -757,8 +1051,20 @@
   /* ---------------- 交互绑定 ---------------- */
 
   function bindUI() {
+    /* 输入类型：只认 pointerdown 记下的 pointerType（iOS Safari 的 click 事件不一定带 pointerType）。
+       捕获阶段：在按钮/牌堆/手牌自己的 pointerdown 之前先把 App.input 定下来。
+       所有触摸新行为都挂在 App.input === 'touch' 上；鼠标路径与改动前逐行等价。 */
+    document.addEventListener('pointerdown', ev => {
+      const isTouch = ev.pointerType !== 'mouse';   // 触控笔也算 touch
+      App.input = isTouch ? 'touch' : 'mouse';
+      const appEl = document.querySelector('.app');
+      if (appEl) appEl.classList.toggle('touch-input', isTouch);
+    }, true);
+
     // 手牌点击：出牌 或 选中需要目标的牌
     $('hand').addEventListener('click', ev => {
+      // 触摸时出牌只走 pointerup 路径，这里压掉松手后的那次 click
+      if (App.input === 'touch') return;
       // 扇形手牌会互相压住：真实指针点击（detail > 0）用几何命中判定定位最上面那张；
       // 测试里的 el.click() 没有坐标且 detail 为 0，退回 closest('.card')
       let cardEl = null;
@@ -800,6 +1106,59 @@
       setHoveredCard(View.handCardAt(ev.clientX, ev.clientY));
     });
     $('hand').addEventListener('pointerleave', () => setHoveredCard(null));
+
+    /* ---------- 触摸：按住滑动挑牌 → 松手选中 → 再点一次出牌 ----------
+       只在 App.input === 'touch' 时生效；鼠标路径完全不进这里（与改动前逐行等价）。 */
+    let touchStart = null;   // 本次按下的候选牌（pointercancel 时清掉）
+    $('hand').addEventListener('pointerdown', ev => {
+      if (App.input !== 'touch') return;
+      const cardEl = View.handCardAt(ev.clientX, ev.clientY);
+      if (!cardEl) return;
+      touchStart = { uid: parseInt(cardEl.dataset.uid, 10) };
+      setHoveredCard(cardEl);                 // 按下就先抬起被盖住的那张
+      const handEl = $('hand');
+      if (typeof handEl.setPointerCapture === 'function' && ev.pointerId != null) {
+        try { handEl.setPointerCapture(ev.pointerId); } catch (e) { /* 不支持就算了 */ }
+      }
+    });
+
+    $('hand').addEventListener('pointerup', ev => {
+      if (App.input !== 'touch') return;
+      if (!touchStart) return;
+      touchStart = null;
+
+      const rect = $('hand').getBoundingClientRect();
+      const inZone = ev.clientX >= rect.left && ev.clientX <= rect.right &&
+                     ev.clientY >= rect.top - 60 && ev.clientY <= rect.bottom;
+      if (!inZone) {                          // 滑走即取消
+        setHoveredCard(null);
+        return;
+      }
+      const cardEl = View.handCardAt(ev.clientX, ev.clientY);
+      if (!cardEl) return;
+      const uid = parseInt(cardEl.dataset.uid, 10);
+
+      const G = App.G;
+      if (!G || G.phase !== 'playing' || G.current !== App.humanId || App.busy) return;
+
+      if (App.selectedUid === uid) {
+        // 再点一次 = 确认出牌；距上次选中不足 300ms 的连点不算（防抖）
+        if (Date.now() - App.selectedAt < 300) return;
+        if (cardEl.classList.contains('playable')) humanPlayCard(uid);
+        return;
+      }
+      // 换选另一张：只选中，不出牌（需要目标的牌也不进入选目标）
+      App.selectedUid = uid;
+      App.selectedAt = Date.now();
+      App.awaitingTarget = false;
+      render();
+    });
+
+    $('hand').addEventListener('pointercancel', () => {
+      if (App.input !== 'touch') return;
+      touchStart = null;
+      setHoveredCard(null);
+    });
 
     // 窗口尺寸变化：手牌宽度变了，扇形步距与命中缓存都要重算
     if (root.addEventListener) {
@@ -895,8 +1254,9 @@
       if (App.soundOn) SFX.click();
     });
 
-    // 日志面板开关
+    // 日志面板开关（桌面：右下角浮层；手机：抽屉的关闭按钮也走这里）
     $('btnLog').addEventListener('click', () => {
+      if (logDrawerOpen) { closeLogDrawer(); return; }
       View.el.logPanel.classList.add('hidden');
       $('btnLogToggle').style.display = 'block';
     });
@@ -905,9 +1265,104 @@
       $('btnLogToggle').style.display = 'none';
     });
 
+    // 手机端：顶栏日志按钮 + 遮罩点击
+    $('btnLogDrawer').addEventListener('click', () => {
+      if (logDrawerOpen) closeLogDrawer();
+      else openLogDrawer();
+    });
+    $('logMask').addEventListener('click', () => {
+      if (logDrawerOpen) closeLogDrawer();
+    });
+
+    /* ---------- 说明条（触摸端） ---------- */
+    const inspect = $('inspect');
+    if (inspect) {
+      const goBtn = inspect.querySelector('.i-go');
+      if (goBtn) {
+        goBtn.addEventListener('click', ev => {
+          if (ev && ev.stopPropagation) ev.stopPropagation();
+          if (App.input !== 'touch') return;
+          const info = inspectInfo;
+          if (!info || info.readonly || App.awaitingTarget) return;
+          if (info.needTarget) {
+            App.awaitingTarget = true;
+            render();
+            return;
+          }
+          if (info.canPlay) humanPlayCard(info.card.uid);
+        });
+      }
+      const closeBtn = inspect.querySelector('.i-close');
+      if (closeBtn) {
+        closeBtn.addEventListener('click', ev => {
+          if (ev && ev.stopPropagation) ev.stopPropagation();
+          closeInspect();
+        });
+      }
+    }
+
+    // 点说明条外面：关闭并吃掉这一次点击（避免顺手点到牌堆抽了牌）
+    document.addEventListener('click', ev => {
+      if (App.input !== 'touch') return;
+      const el = $('inspect');
+      if (!el || !el.classList.contains('show')) return;
+      const t = ev.target;
+      if (t && el.contains && el.contains(t)) return;
+      if (t && t.closest && t.closest('#btnEnd')) return;
+      closeInspect();
+      if (ev.stopPropagation) ev.stopPropagation();
+      if (ev.preventDefault) ev.preventDefault();
+    }, true);
+
+    // 弃牌堆：触摸时用同一说明条只读展示堆顶那张牌
+    const discardTop = $('discardTop');
+    if (discardTop) {
+      discardTop.addEventListener('click', () => {
+        if (App.input !== 'touch') return;
+        const G = App.G;
+        if (!G) return;
+        const state = Engine.getState(G);
+        if (!state.discardTop) return;
+        discardInspect = state.discardTop;
+        App.selectedUid = null;
+        App.awaitingTarget = false;
+        renderInspect();
+      });
+    }
+
+    /* ---------- 炸弹放回位置条（触摸 / 窄屏） ---------- */
+    const placeParts = placeBarParts();
+    if (placeParts) {
+      placeParts.slots.forEach(btn => {
+        btn.addEventListener('click', () => {
+          const G = App.G;
+          if (!G || !G.pendingBomb || G.pendingBomb.player !== App.humanId) return;
+          if (btn.disabled) return;
+          const slot = parseInt(btn.dataset.slot, 10);
+          const deck = G.deck.length;
+          placePos = slotToPos(slot, deck);
+          const ratio = slot >= 6
+            ? 1
+            : Math.max(0, Math.min(1, placePos / Math.max(1, Math.min(deck, 12))));
+          View.showPlaceMarker(ratio, placePos, deck);
+          refreshPlaceBar();
+        });
+      });
+      if (placeParts.ok) {
+        placeParts.ok.addEventListener('click', () => {
+          const G = App.G;
+          if (!G || !G.pendingBomb || G.pendingBomb.player !== App.humanId) return;
+          if (placePos == null) return;
+          commitPlacement(placePos);
+        });
+      }
+    }
+
     // 键盘快捷键
     document.addEventListener('keydown', ev => {
       if (ev.key === 'Escape') {
+        if (logDrawerOpen) closeLogDrawer();
+        discardInspect = null;
         App.selectedUid = null;
         App.awaitingTarget = false;
         render();

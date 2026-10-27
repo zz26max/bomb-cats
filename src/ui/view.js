@@ -542,7 +542,10 @@
     handIncoming.clear();
     handOrdered = [];
     handGeom = null;
-    if (el.hand) el.hand.classList.remove('aiming');
+    if (el.hand) {
+      el.hand.classList.remove('aiming');
+      el.hand.classList.remove('dense');
+    }
   }
 
   function renderHand(state, myId, playableUids, selectedUid, aiming, newUid, incomingUid) {
@@ -629,8 +632,12 @@
   const FAN = {
     pad: 12,            // 桌面端左右留白
     padNarrow: 6,       // ≤620px 左右留白
-    rotStep: 26,        // 旋转角分摊基数：26/(N-1)
-    rotCap: 3.5,        // 单张牌旋转增量上限（度）
+    rotStep: 26,        // 桌面旋转角分摊基数：26/(N-1)
+    rotCap: 3.5,        // 桌面单张牌旋转增量上限（度）→ 总范围 ±13°
+    rotStepNarrow: 18,  // 窄屏旋转角分摊基数：18/(N-1)
+    rotCapNarrow: 3,    // 窄屏单张牌旋转增量上限（度）→ 总范围 ±9°
+    stepMinNarrow: 16,  // 窄屏步距下限（px）
+    stepMaxNarrow: 0.8, // 窄屏步距上限 = 0.8·cw
     arcMax: 18,         // 弧线下沉上限（px）
     arcStep: 2.4,       // 每多一张牌增加的弧线
     narrowArc: 0.75,    // ≤620px 弧线系数
@@ -655,11 +662,12 @@
    * 计算扇形几何，写进每张牌的 --x / --rot / --lift / --z，并缓存命中判定用的基础布局。
    *
    * N = 手牌张数，c = (N-1)/2，t = (i-c)/max(c,1)，cw = 牌宽：
-   *   step  = clamp((Wa-cw)/(N-1), max(.30cw, 20), cw+10)   // Wa = 容器宽 - 2*pad
+   *   step  = clamp((Wa-cw)/(N-1), max(.30cw, 20), cw+10)   // 桌面；窄屏下界 16、上界 0.8·cw
    *   --x   = (i-c) * step
-   *   --rot = (i-c) * min(3.5, 26/(N-1)) 度（总范围天然不超过 ±13°）
+   *   --rot = (i-c) * min(3.5, 26/(N-1)) 度（桌面 ±13°；窄屏 min(3, 18/(N-1)) → ±9°）
    *   --lift= min(18, 2.4*(N-1)) * t²     （≤620px 再 ×0.75）
    *   --z   = i + 1
+   *   step < 0.5·cw 时给 #hand 挂 .dense（竖排卡名）
    *
    * 测试桩里没有 clientWidth，直接 return（integration.test 靠这个不抛异常）。
    */
@@ -676,19 +684,29 @@
     const ch = first.offsetHeight || cssPx('--card-h', 134);
     const narrow = isNarrow();
     const pad = narrow ? FAN.padNarrow : FAN.pad;
-    const Wa = wrap.clientWidth - pad * 2;
+    // 容器宽度下限至少一张牌宽：clientWidth 异常小时也不让 Wa 变负
+    const Wa = Math.max(cw, wrap.clientWidth - pad * 2);
 
     const c = (n - 1) / 2;
-    // 上界 cw+10：牌少时几乎不重叠（设计规范正文的要求），牌多时靠下界保底
-    const stepMax = cw + 10;
-    const stepMin = Math.max(0.30 * cw, 20);
+    // 桌面：上界 cw+10（牌少时几乎不重叠）；窄屏：上界 0.8·cw、下界 16
+    const stepMax = narrow ? FAN.stepMaxNarrow * cw : cw + 10;
+    const stepMin = narrow ? FAN.stepMinNarrow : Math.max(0.30 * cw, 20);
     let step = 0;
     if (n > 1) {
-      step = Math.max(stepMin, Math.min(stepMax, (Wa - cw) / (n - 1)));
+      const fit = (Wa - cw) / (n - 1);          // 容器能容纳的最大步距
+      step = Math.max(stepMin, Math.min(stepMax, fit));
+      // 护栏：容器极窄时下界会把牌挤出容器，这里以「(N-1)*step + cw <= Wa」优先
+      step = Math.min(step, fit);
     }
-    const rotUnit = n > 1 ? Math.min(FAN.rotCap, FAN.rotStep / (n - 1)) : 0;
+    const rotUnit = n > 1
+      ? Math.min(narrow ? FAN.rotCapNarrow : FAN.rotCap,
+                 (narrow ? FAN.rotStepNarrow : FAN.rotStep) / (n - 1))
+      : 0;
     let arc = Math.min(FAN.arcMax, FAN.arcStep * (n - 1));
     if (narrow) arc *= FAN.narrowArc;
+
+    // 牌多到相邻牌压住大半时进入 dense（竖排卡名）；只在窄屏、且单张牌不算
+    wrap.classList.toggle('dense', narrow && n > 1 && step < 0.5 * cw);
 
     const xs = [];
     const rots = [];

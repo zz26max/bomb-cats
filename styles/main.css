@@ -1,3 +1,18 @@
+/* 跨文档 View Transitions：从 zz26max.github.io 主站（zz-works）跳进来时整页淡换。
+   跨文档过渡要求两侧文档都声明 —— 主站与另外两个小玩意仓库也带同一条。
+   不支持的浏览器自动回落成普通跳转。 */
+@view-transition {
+  navigation: auto;
+}
+@media (prefers-reduced-motion: reduce) {
+  ::view-transition-group(*),
+  ::view-transition-image-pair(*),
+  ::view-transition-old(*),
+  ::view-transition-new(*) {
+    animation: none !important;
+  }
+}
+
 /* ==========================================================================
    炸弹猫 · 样式
    美术基调：复古手绘漫画 —— 米白纸面 + 粗黑墨线 + 金黄 + 暖赤 + 深紫。
@@ -57,7 +72,7 @@
 
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
 
-html, body { height: 100%; }
+html, body { height: 100%; overscroll-behavior: none; }
 
 body {
   margin: 0;
@@ -89,6 +104,8 @@ body {
   padding: 10px 14px 14px;
   gap: 0;
   overflow: hidden;
+  /* 去掉双击缩放与点击延迟，但保留双指缩放（不要动 viewport 禁缩放） */
+  touch-action: manipulation;
 }
 
 /* ---------- 顶栏 ---------- */
@@ -197,7 +214,10 @@ body {
   white-space: nowrap;
 }
 
-.btn:hover:not(:disabled) { background: var(--panel-2); border-color: var(--gold); transform: translateY(-1px); }
+/* hover 只在真正有 hover 的设备生效（手机点过后不会一直保持抬起态；桌面恒真） */
+@media (hover: hover) {
+  .btn:hover:not(:disabled) { background: var(--panel-2); border-color: var(--gold); transform: translateY(-1px); }
+}
 .btn:active:not(:disabled) { transform: translateY(0) scale(.98); }
 .btn:disabled { opacity: .35; cursor: not-allowed; }
 
@@ -206,7 +226,9 @@ body {
   border-color: var(--gold);
   color: #241a06;
 }
-.btn.primary:hover:not(:disabled) { background: linear-gradient(180deg, #ffe9bb, var(--gold-2)); }
+@media (hover: hover) {
+  .btn.primary:hover:not(:disabled) { background: linear-gradient(180deg, #ffe9bb, var(--gold-2)); }
+}
 
 .btn.danger {
   background: linear-gradient(180deg, var(--red-2), var(--red));
@@ -264,9 +286,11 @@ body {
   border-color: var(--red);
   animation: targetPulse 1.4s ease-in-out infinite;
 }
-.opponent.targetable:hover {
-  background: rgba(229,72,77,.14);
-  transform: translateY(-3px) scale(1.02);
+@media (hover: hover) {
+  .opponent.targetable:hover {
+    background: rgba(229,72,77,.14);
+    transform: translateY(-3px) scale(1.02);
+  }
 }
 @keyframes targetPulse {
   0%, 100% { box-shadow: 0 0 0 0 rgba(229,72,77,.42); }
@@ -536,8 +560,10 @@ body {
 }
 
 /* hover：暂停呼吸、常亮；用独立属性 translate，别和 .bump/.pulse 的 transform 打架 */
-.pile-stack.can-draw:hover { translate: 0 var(--draw-hover-lift); }
-.pile-stack.can-draw:hover::after { animation: none; opacity: 1; }
+@media (hover: hover) {
+  .pile-stack.can-draw:hover { translate: 0 var(--draw-hover-lift); }
+  .pile-stack.can-draw:hover::after { animation: none; opacity: 1; }
+}
 
 /* 按压反馈同样用独立属性 scale */
 .pile-stack.can-draw:active { scale: .97; }
@@ -810,6 +836,7 @@ body {
    ========================================================================== */
 
 .handzone {
+  position: relative;          /* 炸弹放回位置条（#placeBar）绝对定位的参照 */
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -882,6 +909,16 @@ body {
      免得盖住抽牌浮层(55)、日志面板(70)与弹层(100) */
   isolation: isolate;
 }
+
+/* 触摸输入时（main.js 在 document 捕获阶段判出 pointerType 后挂 .touch-input）：
+   手牌区的滑动挑牌不能被浏览器的手势识别抢走 */
+.app.touch-input .hand { touch-action: none; }
+
+/* 触摸：去掉 iOS 长按弹出的「存储图片/复制」菜单（桌面无影响） */
+.card,
+.card img,
+.opp-avatar img,
+.pile-stack { -webkit-touch-callout: none; }
 
 /* ---------- 卡牌本体：米白纸面 + 金边 + 手绘插画 ---------- */
 .card {
@@ -1047,6 +1084,29 @@ body {
     translate 70ms ease-out,
     rotate 70ms ease-out,
     scale 70ms ease-out;
+}
+
+/* 牌多到相邻牌压住大半时（layoutFan 判定 step < 0.5cw 时给 #hand 挂 .dense）：
+   卡名竖排贴在被压住的左侧窄条上，靠露出的那一条也能读牌名。
+   牌是右压左，所以窄条在左边；selected 时牌已完全展开，恢复横排。 */
+.hand.dense > .card .cname {
+  position: absolute;
+  left: 3px;
+  top: 6px;
+  margin: 0;
+  writing-mode: vertical-rl;
+  font-size: 11px;
+  background: var(--paper);
+  padding: 2px 1px;
+  border-radius: 3px;
+}
+.hand.dense > .card.selected .cname {
+  position: static;
+  writing-mode: horizontal-tb;
+  margin: 2px 0 0;
+  background: none;
+  padding: 0 4px;
+  border-radius: 0;
 }
 
 /* 可出的牌：光标提示（hover 视觉由上面的 .is-hover 负责） */
@@ -1314,7 +1374,9 @@ body {
   transition: all .15s ease;
 }
 
-.segmented button:hover { background: var(--panel-2); color: var(--txt); }
+@media (hover: hover) {
+  .segmented button:hover { background: var(--panel-2); color: var(--txt); }
+}
 .segmented button.on {
   background: linear-gradient(180deg, rgba(243,215,154,.2), rgba(217,176,97,.09));
   border-color: var(--gold);
@@ -1476,6 +1538,10 @@ details.rules .body code {
 
 .logpanel.hidden { transform: translateX(calc(100% + 20px)); opacity: 0; pointer-events: none; }
 
+/* 手机端日志抽屉：入口与遮罩在桌面一律不显示（桌面继续用上面的右下角浮层面板） */
+#btnLogDrawer { display: none; }
+.log-mask { display: none; }
+
 .logpanel .head {
   display: flex;
   align-items: center;
@@ -1500,7 +1566,9 @@ details.rules .body code {
   padding: 0 3px;
   line-height: 1;
 }
-.logpanel .head button:hover { color: var(--gold); }
+@media (hover: hover) {
+  .logpanel .head button:hover { color: var(--gold); }
+}
 
 .loglist {
   overflow-y: auto;
@@ -1617,7 +1685,85 @@ details.rules .body code {
   border-radius: 8px;
   cursor: pointer;
 }
-.asset-warn button:hover { background: rgba(255, 255, 255, .12); }
+@media (hover: hover) {
+  .asset-warn button:hover { background: rgba(255, 255, 255, .12); }
+}
+
+/* ==========================================================================
+   触摸端增补：说明条 #inspect / 炸弹放回位置条 #placeBar
+   桌面端默认不出现（display:none），由 main.js 在触摸 / 窄屏时显示。
+   ========================================================================== */
+
+/* 说明条：默认不占布局、不可见；具体外观在 @media (max-width:620px) 里定义 */
+.inspect { display: none; }
+
+/* 炸弹放回位置条：盖住手牌区 + 按钮行（默认隐藏；只在触摸 / 窄屏的放置状态显示） */
+.place-bar {
+  display: none;
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  z-index: 20;
+  flex-direction: column;
+  gap: 8px;
+  /* 底部让出 iOS 安全区；上/左/右收紧一点，保证 6 档 + 确认按钮在 214px 内排得下 */
+  padding: 6px 8px calc(10px + env(safe-area-inset-bottom));
+  border-radius: 14px;
+  border: 1px solid var(--line-2);
+  /* 不透明底衬：避免手牌 / 按钮透过来干扰阅读 */
+  background: linear-gradient(180deg, rgba(18, 14, 12, .98), rgba(12, 9, 8, .99));
+  box-shadow: 0 12px 30px rgba(0, 0, 0, .55);
+}
+.place-bar.show { display: flex; }
+.place-bar .pb-title {
+  font-size: 13.5px;
+  font-weight: 800;
+  color: var(--gold-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: none;
+}
+.place-bar .pb-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-auto-rows: 56px;
+  gap: 8px;
+  flex: none;
+}
+.place-bar .pb-slot,
+.place-bar .pb-ok {
+  border-radius: 10px;
+  border: 1px solid var(--line-2);
+  background: var(--panel-2);
+  color: var(--txt);
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+.place-bar .pb-slot { height: 56px; font-size: 13px; }
+.place-bar .pb-slot.on {
+  border-color: var(--gold);
+  background: linear-gradient(180deg, rgba(243, 215, 154, .22), rgba(217, 176, 97, .10));
+  color: var(--gold-2);
+}
+.place-bar .pb-ok {
+  height: 44px;
+  font-size: 13.5px;
+  background: linear-gradient(180deg, var(--gold-2), var(--gold));
+  border-color: var(--gold);
+  color: #241a06;
+}
+.place-bar .pb-slot:disabled,
+.place-bar .pb-ok:disabled { opacity: .35; cursor: not-allowed; }
+.place-bar button:active:not(:disabled) { scale: .96; }
+
+/* 减少动态效果：不做按压/位移动画，只保留瞬时反馈 */
+@media (prefers-reduced-motion: reduce) {
+  .place-bar button:active:not(:disabled) { scale: 1; }
+}
 
 /* ==========================================================================
    响应式
@@ -1632,11 +1778,356 @@ details.rules .body code {
   .logpanel { width: 214px; max-height: 176px; }
 }
 
+/* ==========================================================================
+   手机竖屏（≤620px）：布局骨架
+   同一套 DOM，只靠 @media 切换；桌面断点以上完全不受影响。
+   纵向分区：顶栏 44 / 对手区 56 / 中央舞台 1fr / 手牌区 card-h+56 / 按钮行 48
+   ========================================================================== */
+
 @media (max-width: 620px) {
-  :root { --card-w: 70px; --card-h: 100px; }
-  .app { padding: 8px 9px 10px; }
-  .brand h1 { font-size: 15px; }
-  .brand .sub { display: none; }
+  :root { --card-w: 82px; --card-h: 114px; }
+
+  .app {
+    width: 100%;
+    overflow-x: clip;                 /* 横向永不溢出；纵向仍是 base 的 overflow:hidden */
+    padding: calc(8px + env(safe-area-inset-top)) 9px max(10px, env(safe-area-inset-bottom));
+    grid-template-rows: 44px minmax(0, 1fr);
+  }
+  /* 根因修复：grid 子项默认 min-width:auto，对手区/按钮行的 min-content 会把整列撑宽，
+     所有行（含手牌区）跟着变宽 → 右侧被裁。这里统一允许收缩。 */
+  .app > *,
+  .table > *,
+  .handzone > * { min-width: 0; max-width: 100%; }
+
+  /* ---------- 顶栏：只留中文 logo + 牌堆信息 + 图标按钮 ---------- */
+  .topbar {
+    height: 44px;
+    padding: 0 4px 0 2px;             /* 右端 44px 是日志按钮（批 5 已实装） */
+    gap: 8px;
+    min-width: 0;
+  }
+  .brand-en { display: none; }
+  .topbar > .btn { flex: 0 0 auto; }   /* 音效 / 重开 / 日志不被压扁 */
+  .deck-info { flex: 0 0 auto; }
+  /* 「回合 N」是 .deck-info 的第 3 个 span（也是最后一个子节点），两个选择器都写，
+     避免结构微调时漏隐藏；剩下的「♂ N」是 #bombTotal（本局炸弹总数），不是回合数。 */
+  .deck-info > span:last-child,
+  .deck-info > span:nth-child(3) { display: none; }
+  #btnRestart > span { display: none; }             /* 重开只留图标 */
+
+  /* ---------- 顶栏日志入口 + 日志抽屉（只在 ≤620 出现） ---------- */
+  #btnLogDrawer {
+    display: inline-flex;
+    width: 44px;
+    height: 44px;
+    padding: 0;
+    justify-content: center;
+  }
+  .log-mask {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 90;
+    background: rgba(0, 0, 0, .55);
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    transition: opacity 180ms ease;
+  }
+  .log-mask.show { opacity: 1; visibility: visible; pointer-events: auto; }
+  /* 抽屉：复用 .logpanel 的 DOM，改成底部上滑的面板 */
+  #logPanel.drawer {
+    display: flex;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    top: auto;
+    width: auto;
+    max-height: 60vh;
+    border-radius: 16px 16px 0 0;
+    z-index: 95;
+    opacity: 1;
+    transform: translateY(100%);
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  #logPanel.drawer.show { transform: translateY(0); }
+
+  /* ---------- 对手区：单行不换行，每人一小块 ---------- */
+  .table { grid-template-rows: 56px minmax(0, 1fr) auto; }
+  .opponents {
+    height: 56px;
+    flex-wrap: nowrap;
+    gap: 6px;
+    padding: 0;
+    align-items: stretch;
+    min-width: 0;
+  }
+  .opponent {
+    display: grid;
+    grid-template-columns: 32px minmax(0, 1fr);
+    grid-template-rows: auto auto;
+    grid-template-areas: "avatar head" "avatar hand";
+    align-content: center;
+    align-items: center;
+    column-gap: 6px;
+    row-gap: 1px;
+    flex: 1 1 0;
+    min-width: 0;
+    max-width: 118px;
+    padding: 4px 7px;
+    border-radius: 10px;
+  }
+  .opp-avatar { grid-area: avatar; width: 32px; height: 32px; margin: 0; }
+  .opp-avatar .cat { width: 30px; height: 30px; }
+  .opp-head { grid-area: head; margin: 0; justify-content: flex-start; gap: 4px; min-width: 0; }
+  .opp-head .nm {
+    font-size: 11.5px;
+    max-width: 100%;
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .opp-head .badge { display: none; }
+  .opp-hand { grid-area: hand; display: block; min-height: 0; padding: 0; }
+  .opp-hand .card-back { display: none; }
+  .opp-hand .count { font-size: 11px; margin-left: 0; }
+
+  /* ---------- 中央舞台：绒布铺满中间区域（默认拉伸），两堆贴底 ---------- */
+  .stage { border-radius: 16px; }
+  .piles {
+    position: absolute;
+    left: 50%;
+    bottom: 104px;                    /* 牌堆标签底距舞台底约 104px */
+    transform: translateX(-50%);
+    gap: 28px;
+  }
+  .pile-stack, .discard-top { width: 64px; height: 88px; }
+  .pile-stack .badge-num { font-size: 18px; }
+  .pile .label { font-size: 9px; letter-spacing: .12em; }
+  .prompt {
+    position: absolute;
+    left: 50%;
+    bottom: 8px;
+    transform: translateX(-50%);
+    width: calc(100% - 16px);
+    max-height: 52px;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    padding: 5px 12px;
+    border-radius: 12px;
+    font-size: 13px;
+    line-height: 1.5;
+  }
+
+  /* ---------- 说明条 #inspect（触摸端；桌面 .inspect 恒 display:none） ---------- */
+  #inspect {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    grid-template-rows: auto auto;
+    align-items: center;
+    column-gap: 8px;
+    position: absolute;
+    left: 8px;
+    right: 8px;
+    bottom: 8px;
+    height: 72px;
+    padding: 8px 10px;
+    border-radius: 12px;
+    border: 1px solid var(--line-2);
+    background: rgba(10, 8, 7, .94);
+    box-shadow: 0 12px 30px rgba(0, 0, 0, .55);
+    z-index: 30;
+    opacity: 0;
+    translate: 0 8px;
+    visibility: hidden;
+    pointer-events: none;
+    transition: opacity 160ms ease, translate 160ms ease;
+  }
+  #inspect.show {
+    opacity: 1;
+    translate: 0 0;
+    visibility: visible;
+    pointer-events: auto;
+  }
+  #inspect .i-name {
+    grid-column: 1;
+    grid-row: 1;
+    font-size: 16px;
+    font-weight: 900;
+    color: var(--gold-2);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  #inspect .i-text {
+    grid-column: 1;
+    grid-row: 2;
+    font-size: 13px;
+    line-height: 1.4;
+    color: var(--txt);
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  #inspect .i-go {
+    grid-column: 2;
+    grid-row: 1 / span 2;
+    align-self: center;
+    min-width: 88px;
+    height: 44px;
+    padding: 0 14px;
+    border-radius: 10px;
+    border: 1px solid var(--gold);
+    background: linear-gradient(180deg, var(--gold-2), var(--gold));
+    color: #241a06;
+    font: inherit;
+    font-size: 13.5px;
+    font-weight: 800;
+    cursor: pointer;
+  }
+  #inspect .i-go:disabled { opacity: .4; cursor: not-allowed; }
+  #inspect .i-close {
+    grid-column: 3;
+    grid-row: 1 / span 2;
+    align-self: center;
+    width: 44px;
+    height: 44px;
+    border-radius: 10px;
+    border: 1px solid var(--line-2);
+    background: var(--panel-2);
+    color: var(--txt);
+    font: inherit;
+    font-size: 18px;
+    line-height: 1;
+    cursor: pointer;
+  }
+  #inspect .i-go:active:not(:disabled),
+  #inspect .i-close:active,
+  #inspect .i-target:active,
+  #inspect .i-cancel:active { scale: .95; }
+
+  /* 目标栏：说明条切成一行按钮（取消 + 每个可选对手） */
+  #inspect.targeting {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px;
+  }
+  #inspect.targeting .i-name,
+  #inspect.targeting .i-text,
+  #inspect.targeting .i-go,
+  #inspect.targeting .i-close { display: none; }
+  #inspect .i-cancel {
+    flex: 0 0 auto;
+    height: 44px;
+    min-width: 52px;
+    padding: 0 10px;
+    border-radius: 10px;
+    border: 1px solid var(--line-2);
+    background: transparent;
+    color: var(--dim);
+    font: inherit;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  #inspect .i-target {
+    flex: 1 1 0;
+    min-width: 60px;
+    height: 44px;
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    padding: 0 6px;
+    border-radius: 10px;
+    border: 1px solid var(--line-2);
+    background: var(--panel-2);
+    color: var(--txt);
+    font: inherit;
+    cursor: pointer;
+    overflow: hidden;
+  }
+  #inspect .i-target .t-cat {
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    flex: none;
+    object-fit: cover;
+  }
+  #inspect .i-target .t-col {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    min-width: 0;
+    line-height: 1.15;
+  }
+  #inspect .i-target .t-name {
+    max-width: 100%;
+    font-size: 11px;
+    font-weight: 700;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  #inspect .i-target .t-count { font-size: 10px; color: var(--dim); }
+
+  /* 说明条出现时压掉提示条（保留布局，只改透明度，避免跳动） */
+  .stage .prompt { transition: opacity 120ms ease; }
+  .stage.inspecting .prompt { opacity: 0; }
+
+  /* ---------- 手牌区 + 按钮行：两行网格 ---------- */
+  .handzone {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    grid-template-rows: calc(var(--card-h) + 56px) 48px;
+    grid-template-areas: "hand hand" "plate actions";
+    gap: 6px 8px;
+    padding-top: 0;
+  }
+  .hand {
+    grid-area: hand;
+    height: calc(var(--card-h) + 56px);
+    min-height: calc(var(--card-h) + 56px);
+    padding: 0;
+  }
+  .myplate {
+    grid-area: plate;
+    align-self: center;
+    flex: 0 0 auto;
+    min-width: 0;
+    height: 44px;
+    padding: 0 10px 0 4px;
+    gap: 6px;
+  }
+  .myplate .plate-cat { width: 28px; height: 28px; }
+  /* 名字可省略，别把按钮行挤出去 */
+  .myplate .nm {
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .myplate .tag { flex: none; }
+  .actions {
+    grid-area: actions;
+    justify-content: flex-end;
+    flex-wrap: nowrap;
+    gap: 8px;
+    padding: 0;
+    min-width: 0;
+  }
+  /* 手牌数在窄屏按钮行里放不下（身份牌 + 提示 44 + 结束按钮已占满 360 宽），
+     手牌本身看得见，这里直接隐藏；需要的话下一批挪进身份牌。 */
+  .hand-count { display: none; }
+  #btnHint { width: 44px; height: 44px; padding: 0; justify-content: center; }
+  #btnHint > span { display: none; }
+  /* 不再用 160px 下限：窄屏按剩余空间撑满，文字在 ≤374 时缩成「结束回合」 */
+  #btnEnd { flex: 1 1 auto; min-width: 0; height: 44px; justify-content: center; }
+
+  /* ---------- 其余细节 ---------- */
   .card .glyph { font-size: 21px; margin: 2px 0; }
   .card .cname { font-size: 10.5px; }
   .card .ctext { display: none; }
@@ -1650,13 +2141,51 @@ details.rules .body code {
     translate: var(--x, 0px) calc(var(--lift, 0px) - 22px);
     scale: 1.10;
   }
-  .opponents { gap: 6px; }
-  .opponent { min-width: 92px; padding: 7px 9px; }
-  .opp-head .nm { font-size: 11.5px; }
-  .piles { gap: 20px; }
+  .floater {
+    font-size: 18px;
+    white-space: normal;
+    max-width: 90%;
+    text-align: center;
+  }
   .logpanel { display: none; }
   .result-stats { gap: 6px; }
   .stat .v { font-size: 16px; }
+}
+
+/* 卡牌再缩两档（更窄的机型） */
+@media (max-width: 413px) {
+  :root { --card-w: 76px; --card-h: 106px; }
+}
+
+@media (max-width: 374px) {
+  :root { --card-w: 70px; --card-h: 98px; }
+  /* 更窄的屏：结束回合按钮文案缩成「结束回合」（CSS 换字，不动 HTML 文本节点） */
+  #btnEnd > span { font-size: 0; }
+  #btnEnd > span::before { content: "结束回合"; font-size: 13px; }
+}
+
+/* 矮屏（Safari 工具栏展开后的可视高）：舞台目标 226，空间不足时允许缩一点（避免总高超出 4px） */
+@media (max-width: 620px) and (max-height: 620px) {
+  .table { grid-template-rows: 52px minmax(0, 226px) auto; }
+  .opponents { height: 52px; }
+}
+
+/* 横屏手机：盖一层「请把手机竖过来」，挡住所有点击（只在触摸 + 矮横屏生效） */
+@media (orientation: landscape) and (max-height: 500px) and (pointer: coarse) {
+  body::after {
+    content: "请把手机竖过来";
+    position: fixed;
+    inset: 0;
+    z-index: 1000;
+    display: grid;
+    place-items: center;
+    background: rgba(10, 8, 7, .96);
+    color: var(--gold-2);
+    font-size: 16px;
+    font-weight: 700;
+    letter-spacing: .08em;
+    pointer-events: auto;
+  }
 }
 
 /* 尊重「减少动态效果」的系统偏好 */
@@ -1671,6 +2200,8 @@ details.rules .body code {
   /* 牌的进出只留 120ms 淡入淡出（JS 的 CARD_IN_MS / CARD_OUT_MS 兜底仍在上限内） */
   .card.entering, .card.newly-drawn { animation: cardFadeIn 120ms ease !important; }
   .card.leaving { animation: cardFadeOut 120ms ease forwards !important; }
+  /* 说明条：只保留淡入，不做位移动画 */
+  #inspect { transition: opacity 120ms ease !important; translate: 0 0; }
 }
 
 @keyframes cardFadeIn {

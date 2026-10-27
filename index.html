@@ -44,6 +44,8 @@
 
     <button class="btn icon" id="btnSound" title="音效开关"><svg class="ic" aria-hidden="true"><use href="#ic-sound-on"></use></svg></button>
     <button class="btn small icon-text" id="btnRestart" title="重开一局"><svg class="ic" aria-hidden="true"><use href="#ic-restart"></use></svg><span>重开</span></button>
+    <!-- 手机端日志抽屉入口（桌面隐藏；桌面仍用右下角浮层日志面板） -->
+    <button class="btn icon" id="btnLogDrawer" aria-label="对局日志" title="对局日志"><svg class="ic" aria-hidden="true"><use href="#ic-log"></use></svg></button>
   </header>
 
   <!-- ============ 牌桌 ============ -->
@@ -83,6 +85,14 @@
 
       <div class="prompt" id="prompt">准备开始…</div>
 
+      <!-- 说明条（触摸端：选中手牌 / 弃牌堆顶 / 选目标）；桌面不显示 -->
+      <div class="inspect" id="inspect">
+        <span class="i-name"></span>
+        <span class="i-text"></span>
+        <button class="i-go" type="button" disabled>出牌</button>
+        <button class="i-close" type="button" aria-label="关闭说明">×</button>
+      </div>
+
       <!-- 「预测未来」浮层 -->
       <div class="peek-panel" id="peekPanel">
         <div class="title">预测未来 · 牌堆顶 3 张</div>
@@ -107,6 +117,20 @@
         <button class="btn icon-text" id="btnHint"><svg class="ic" aria-hidden="true"><use href="#ic-hint"></use></svg><span>提示</span></button>
         <button class="btn primary icon-text" id="btnEnd"><svg class="ic" aria-hidden="true"><use href="#ic-endturn"></use></svg><span>结束回合 · 抽牌</span></button>
       </div>
+
+      <!-- 炸弹放回位置选择条（触摸 / 窄屏的放置状态）；桌面不显示 -->
+      <div class="place-bar" id="placeBar">
+        <div class="pb-title">炸弹放回哪里？</div>
+        <div class="pb-grid">
+          <button class="pb-slot" type="button" data-slot="1">第 1 张</button>
+          <button class="pb-slot" type="button" data-slot="2">第 2 张</button>
+          <button class="pb-slot" type="button" data-slot="3">第 3 张</button>
+          <button class="pb-slot" type="button" data-slot="4">第 4 张</button>
+          <button class="pb-slot" type="button" data-slot="5">第 5 张</button>
+          <button class="pb-slot" type="button" data-slot="6">最底部</button>
+        </div>
+        <button class="pb-ok" type="button" disabled>请选择位置</button>
+      </div>
     </section>
 
   </main>
@@ -121,6 +145,8 @@
   </div>
   <div class="loglist" id="logList"></div>
 </aside>
+<!-- 手机端日志抽屉的半透明遮罩（桌面不显示） -->
+<div class="log-mask" id="logMask"></div>
 <button class="btn log-toggle icon-text" id="btnLogToggle" style="display:none"><svg class="ic" aria-hidden="true"><use href="#ic-log"></use></svg><span>日志</span></button>
 
 <!-- ============ 开局设置 ============ -->
