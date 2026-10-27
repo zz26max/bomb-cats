@@ -75,7 +75,9 @@
     art.src = artOf(card.type, o.size === 'face' ? 'face' : 'icon');
     art.alt = card.name || '';
     art.draggable = false;
-    art.loading = 'lazy';
+    // 显式 eager：夸克浏览器的「图片懒加载加速」会把动态插入的 <img> 替换成占位图，
+    // 卡面/猫头像会裂图或空白（线上资源本身正常）。卡面是即时可见的小图，不需要懒加载。
+    art.loading = 'eager';
 
     const name = document.createElement('div');
     name.className = 'cname';
