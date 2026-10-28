@@ -27,10 +27,26 @@
     awaitingTarget: false,
     busy: false,         // 动画播放中，锁定输入
     soundOn: true,
+    mode: 'local',       // 开局面板的选择：local | online
+    online: null,        // 联机会话：{ conn, code, seat, token, state, moves, host }
     stats: { turns: 0, drawn: 0, played: 0, startAt: 0 }
   };
 
   const delay = ms => new Promise(r => setTimeout(r, ms));
+
+  /* ---------------- 状态源：单机读本地引擎，联机读服务器快照 ---------------- */
+
+  function curState() {
+    if (App.online) return App.online.state;
+    return App.G ? Engine.getState(App.G) : null;
+  }
+
+  function curMoves() {
+    if (App.online) {
+      return App.online.moves || { playable: [], needTarget: [], canEnd: false };
+    }
+    return Engine.legalMoves(App.G, curState().current);
+  }
 
   /**
    * 触觉反馈：只在支持的设备生效（Android 手机的浏览器；iOS 会忽略，无副作用）。
@@ -50,8 +66,14 @@
    * 不满足时调用方一律静默返回（不报错、不弹提示）。
    */
   function canHumanDraw() {
+    if (App.busy) return false;
+    if (App.online) {
+      const s = App.online.state;
+      return !!s && s.phase === 'playing' && s.current === App.humanId &&
+             !s.pendingBomb && !App.awaitingTarget;
+    }
     const G = App.G;
-    if (!G || App.busy) return false;
+    if (!G) return false;
     if (G.phase !== 'playing') return false;
     if (G.current !== App.humanId) return false;
     // 放炸弹模式：牌堆的点击归 enableBombPlacement() 的临时监听器，这里必须让开
@@ -63,14 +85,14 @@
   /* ---------------- 渲染总入口 ---------------- */
 
   function render() {
-    if (!App.G) return;
-    const state = Engine.getState(App.G);
+    const state = curState();
+    if (!state) return;                  // 单机未开局 / 联机还在等待室
     const myId = App.humanId;
 
     // 选中失效：牌已不在手牌里（被抢 / 被弃 / 换局），清掉免得下次误判
     if (App.selectedUid != null) {
       const me = state.players[myId];
-      if (!me || !me.hand.some(c => c.uid === App.selectedUid)) {
+      if (!me || !me.hand || !me.hand.some(c => c.uid === App.selectedUid)) {
         App.selectedUid = null;
         App.awaitingTarget = false;
       }
@@ -80,8 +102,8 @@
     // （对局结束 / 状态被外部推进 / 读档等都不经过点击路径）
     if (bombPlaceCleanup && !state.pendingBomb) clearBombPlacement();
 
-    // 计算哪些牌现在可以出
-    const lm = Engine.legalMoves(App.G, state.current);
+    // 计算哪些牌现在可以出（联机时服务器已经算好，快照自带）
+    const lm = curMoves();
     const playable = new Set();
     let targetableIds = null;
 
@@ -414,8 +436,26 @@
     return result;
   }
 
-  /** 真人的一次出牌 */
+  /** 真人的一次出牌（联机：把动作发给服务器；单机：本地引擎结算） */
   async function humanPlayCard(uid) {
+    if (App.online) {
+      const moves = App.online.moves || { playable: [], needTarget: [] };
+      const need = moves.needTarget.find(m => m.cardUid === uid);
+      if (need) {
+        // 需要目标：先选中，等待点击对手（交互与单机一致，只是结算在服务器）
+        App.selectedUid = uid;
+        App.awaitingTarget = true;
+        render();
+        View.floater('选择一名对手', 'var(--gold)', { info: true });
+        return;
+      }
+      App.selectedUid = null;
+      App.awaitingTarget = false;
+      App.busy = true;
+      netSend({ t: 'act', act: 'play', uid: uid });
+      return;
+    }
+
     const G = App.G;
     const card = G.players[App.humanId].hand.find(c => c.uid === uid);
     if (!card) return;
@@ -447,12 +487,26 @@
     if (!App.awaitingTarget || App.selectedUid == null) return;
     const uid = App.selectedUid;
     App.awaitingTarget = false;
+    if (App.online) {
+      App.selectedUid = null;
+      App.busy = true;
+      netSend({ t: 'act', act: 'play', uid: uid, target: targetId });
+      return;
+    }
     const r = await runAction(() => Engine.playCard(App.G, App.humanId, uid, targetId));
     if (r && r.needsPlacement) await handlePlacementIfNeeded();
   }
 
   /** 真人结束回合（抽牌） */
   async function humanEndTurn() {
+    if (App.online) {
+      if (!canHumanDraw()) return;
+      // 点击的一瞬先收掉牌堆的「可抽」光晕（与单机同理：下一次 render 要等动画播完）
+      View.setPileDrawable(false);
+      App.busy = true;
+      netSend({ t: 'act', act: 'end' });
+      return;
+    }
     const G = App.G;
     // 点击的一瞬先收掉牌堆的「可抽」光晕：光晕由 render() 管理，
     // 而下一次 render 要等抽牌动画播完才跑，不收的话点击后它还会再闪一秒
@@ -488,6 +542,12 @@
     fn();
   }
 
+  /** 当前牌堆张数（联机读快照，单机读本地引擎） */
+  function curDeckSize() {
+    if (App.online) return App.online.state ? App.online.state.deckSize : 0;
+    return App.G && App.G.deck ? App.G.deck.length : 0;
+  }
+
   /** 指针高度占牌堆高度的比例（不做上下夹取，越界由 posFromEvent 的 clamp 兜住） */
   function ratioFromEvent(ev) {
     const stack = document.querySelector('.pile-stack');
@@ -503,8 +563,7 @@
    * 12 槽是刻意的：牌堆 100px 高，按张数分格点不准；真正有意义的也是接下来要抽的十几张。
    */
   function posFromEvent(ev) {
-    const G = App.G;
-    const deckSize = G && G.deck ? G.deck.length : 0;
+    const deckSize = curDeckSize();
     const ratio = ratioFromEvent(ev);
     return Math.max(0, Math.min(deckSize, Math.round(ratio * Math.min(deckSize, 12))));
   }
@@ -544,11 +603,10 @@
 
     /** 悬停 / 触摸预览：横线画在指针高度，文案给出会插到第几张 */
     const onMove = (ev) => {
-      const G = App.G;
-      if (!G || !G.pendingBomb) return;
+      if (!curState() || !curState().pendingBomb) return;
       const ratio = ratioFromEvent(ev);
       const pos = posFromEvent(ev);
-      const deckSize = G.deck.length;
+      const deckSize = curDeckSize();
       View.showPlaceMarker(ratio, pos, deckSize);
       View.setPrompt(placePrompt() + '（当前：' + View.placeMarkerText(pos, deckSize) + '）', true);
     };
@@ -562,10 +620,9 @@
       const pos = posFromEvent(ev);
       if (App.input === 'touch') {
         // 触摸：点牌堆只把预览移到点击高度对应的档位，不提交（提交走放置条的确认按钮）
-        const G = App.G;
-        if (!G) return;
+        if (!curState()) return;
         placePos = pos;
-        const deck = G.deck.length;
+        const deck = curDeckSize();
         const ratio = Math.max(0, Math.min(1, placePos / Math.max(1, Math.min(deck, 12))));
         View.showPlaceMarker(ratio, placePos, deck);
         refreshPlaceBar();
@@ -622,6 +679,27 @@
 
   /** 说明条要展示的牌信息：选中的手牌优先，其次弃牌堆顶 */
   function inspectCardInfo() {
+    if (App.online) {
+      const s = App.online.state;
+      if (!s) return null;
+      if (App.selectedUid != null) {
+        const me = s.players[App.humanId];
+        const card = me && me.hand ? me.hand.find(c => c.uid === App.selectedUid) : null;
+        if (!card) return null;
+        const moves = App.online.moves || { playable: [], needTarget: [] };
+        const need = moves.needTarget.find(m => m.cardUid === card.uid);
+        return {
+          card,
+          canPlay: moves.playable.some(m => m.cardUid === card.uid),
+          needTarget: !!need,
+          targets: need ? need.targets : null,
+          readonly: false
+        };
+      }
+      if (discardInspect) return { card: discardInspect, canPlay: false, needTarget: false, targets: null, readonly: true };
+      return null;
+    }
+
     const G = App.G;
     if (!G) return null;
     if (App.selectedUid != null) {
@@ -694,19 +772,19 @@
   function renderInspect() {
     const el = $('inspect');
     if (!el) return;
-    const G = App.G;
+    const live = App.online ? !!App.online.state : !!App.G;
     const stage = document.querySelector('.stage');
     const touch = App.input === 'touch';
     let mode = null;
     inspectInfo = null;
 
-    if (touch && G && App.selectedUid != null) {
+    if (touch && live && App.selectedUid != null) {
       const info = inspectCardInfo();
       if (info) {
         inspectInfo = info;
         mode = (App.awaitingTarget && info.needTarget) ? 'target' : 'card';
       }
-    } else if (touch && G && discardInspect) {
+    } else if (touch && live && discardInspect) {
       inspectInfo = inspectCardInfo();
       mode = inspectInfo ? 'card' : null;
     }
@@ -730,7 +808,7 @@
     }
 
     if (mode === 'target') {
-      renderTargetButtons(el, inspectInfo.targets, Engine.getState(G));
+      renderTargetButtons(el, inspectInfo.targets, curState());
       return;
     }
 
@@ -743,7 +821,8 @@
     if (textEl) textEl.textContent = def.text || '';
     if (goEl) {
       const readonly = !!inspectInfo.readonly;
-      const myTurn = !!(G && G.current === App.humanId && G.phase === 'playing');
+      const cs = curState();
+      const myTurn = !!(cs && cs.current === App.humanId && cs.phase === 'playing');
       goEl.style.display = readonly ? 'none' : '';
       if (readonly) {
         goEl.disabled = true;
@@ -797,8 +876,8 @@
 
   /** 放置条显示条件：真人待放炸弹 + (触摸 或 窄屏) */
   function placeBarWanted() {
-    const G = App.G;
-    if (!G || !G.pendingBomb || G.pendingBomb.player !== App.humanId) return false;
+    const state = curState();
+    if (!state || !state.pendingBomb || state.pendingBomb.player !== App.humanId) return false;
     return App.input === 'touch' || (root.innerWidth || 0) <= 620;
   }
 
@@ -816,8 +895,7 @@
     const on = placeBarWanted();
     parts.bar.classList.toggle('show', on);
     if (!on) { placePos = null; return; }
-    const G = App.G;
-    const deck = G.deck.length;
+    const deck = curDeckSize();
     parts.slots.forEach(btn => {
       const slot = parseInt(btn.dataset.slot, 10);
       let enabled;
@@ -846,6 +924,11 @@
   /** 提交炸弹放置（鼠标点牌堆 / 放置条确认共用） */
   async function commitPlacement(pos) {
     clearBombPlacement();
+    if (App.online) {
+      App.busy = true;
+      netSend({ t: 'act', act: 'place', pos: pos });
+      return;
+    }
     const r = Engine.placeBomb(App.G, App.humanId, pos);
     if (r.ok) {
       View.floater('炸弹已放回', 'var(--red-2)');
@@ -887,6 +970,7 @@
   let aiTimer = null;
 
   function scheduleAIIfNeeded() {
+    if (App.online) return;              // 联机没有 AI，回合推进全在服务器
     const G = App.G;
     if (!G || G.phase !== 'playing') return;
     if (G.pendingBomb) return;
@@ -898,6 +982,7 @@
 
   async function driveAI() {
     const G = App.G;
+    if (App.online) return;              // 联机没有 AI
     if (!G || G.phase !== 'playing' || App.busy) return;
 
     const pid = G.current;
@@ -973,19 +1058,13 @@
 
   let overShown = false;
 
-  async function checkGameOver() {
-    const G = App.G;
-    if (!G || G.phase !== 'over' || overShown) return;
-    overShown = true;
-
-    await delay(500);
-    const win = G.winner === App.humanId;
+  /** 结算面板（单机 / 联机共用）：胜负音效、插画、统计、弹层 */
+  function showResultPanel(win, winnerName, turns) {
     if (win) {
       SFX.win(); buzz([40, 60, 40, 60, 100]);
       View.burst(window.innerWidth / 2, window.innerHeight / 2, 70, ['#f3d79a', '#d9b061', '#fff0d0', '#ffd39b']);
     } else { SFX.lose(); buzz(120); }
 
-    const winnerName = G.players[G.winner] ? G.players[G.winner].name : '？';
     // 胜利用庆祝插画，失败用出局插画（单文件版会走内联数据）
     const art = $('resultArt');
     if (art) {
@@ -1002,12 +1081,22 @@
       : '再来一局，这次记得盯着牌堆。';
 
     const elapsed = Math.max(1, Math.round((Date.now() - App.stats.startAt) / 1000));
-    // 回合数直接从引擎取，避免依赖定时器轮询带来的滞后
-    $('statTurns').textContent = G.turn;
+    $('statTurns').textContent = turns;
     $('statPlayed').textContent = App.stats.played;
     $('statTime').textContent = elapsed + 's';
 
     View.showModal('modalResult');
+  }
+
+  async function checkGameOver() {
+    const G = App.G;
+    if (!G || G.phase !== 'over' || overShown) return;
+    overShown = true;
+
+    await delay(500);
+    const win = G.winner === App.humanId;
+    const winnerName = G.players[G.winner] ? G.players[G.winner].name : '？';
+    showResultPanel(win, winnerName, G.turn);
   }
 
   /* ---------------- 开局 ---------------- */
@@ -1120,9 +1209,9 @@
       }
       if (!cardEl) return;
       if (App.busy) return;
-      const G = App.G;
-      if (!G || G.phase !== 'playing') return;
-      if (G.current !== App.humanId) return;
+      const state = curState();
+      if (!state || state.phase !== 'playing') return;
+      if (state.current !== App.humanId) return;
       const uid = parseInt(cardEl.dataset.uid, 10);
 
       if (!cardEl.classList.contains('playable')) {
@@ -1183,8 +1272,8 @@
       if (!cardEl) return;
       const uid = parseInt(cardEl.dataset.uid, 10);
 
-      const G = App.G;
-      if (!G || G.phase !== 'playing' || G.current !== App.humanId || App.busy) return;
+      const state = curState();
+      if (!state || state.phase !== 'playing' || state.current !== App.humanId || App.busy) return;
 
       if (App.selectedUid === uid) {
         // 再点一次 = 确认出牌；距上次选中不足 200ms 的连点不算（防误触双击）。
@@ -1199,10 +1288,17 @@
       App.selectedAt = Date.now();
       // 需要目标的牌：选中即进入选目标（对手区高亮 + 说明条切目标栏），
       // 省掉「先选中 → 再点『选目标』」的中间一步；取消走目标栏的「取消」按钮
-      const picked = G.players[App.humanId].hand.find(c => c.uid === uid);
-      App.awaitingTarget = !!(picked &&
-        CARDS[picked.type].need === 'player' &&
-        cardEl.classList.contains('playable'));
+      let needTarget;
+      if (App.online) {
+        needTarget = (App.online.moves.needTarget || []).some(m => m.cardUid === uid) &&
+                     cardEl.classList.contains('playable');
+      } else {
+        const picked = state.players[App.humanId].hand.find(c => c.uid === uid);
+        needTarget = !!(picked &&
+          CARDS[picked.type].need === 'player' &&
+          cardEl.classList.contains('playable'));
+      }
+      App.awaitingTarget = needTarget;
       render();
     });
 
@@ -1244,6 +1340,13 @@
 
     // 提示按钮：显示当前建议
     $('btnHint').addEventListener('click', () => {
+      if (App.online) {
+        // 联机看不到牌堆内容（隐藏信息在服务器），只报可出牌数
+        const moves = App.online.moves || { playable: [], needTarget: [] };
+        const n = moves.playable.length + moves.needTarget.length;
+        View.floater('可出 ' + n + ' 张牌', 'var(--gold)', { info: true });
+        return;
+      }
       const G = App.G;
       if (!G) return;
       if (G.current !== App.humanId) { View.floater('还没轮到你', 'var(--faint)', { info: true }); return; }
@@ -1259,10 +1362,12 @@
 
     // 重开
     $('btnRestart').addEventListener('click', () => {
+      if (App.online) { leaveOnline(); applySetupMode('local'); }
       View.hideModal('modalResult');
       View.showModal('modalSetup');
     });
     $('btnAgain').addEventListener('click', () => {
+      if (App.online) { leaveOnline(); applySetupMode('local'); }
       View.hideModal('modalResult');
       View.showModal('modalSetup');
     });
@@ -1293,8 +1398,38 @@
       if (hint) hint.textContent = DIFF_HINTS[App.difficulty] || '';
     });
 
-    // 开始
-    $('btnStart').addEventListener('click', startGame);
+    // 对局模式：单机 / 联机
+    $('setupMode').addEventListener('click', ev => {
+      const b = ev.target.closest('button');
+      if (!b) return;
+      const mode = b.dataset.v;
+      if (mode === 'local' && App.online) leaveOnline();   // 从联机切回单机 = 退出房间
+      applySetupMode(mode);
+    });
+
+    // 联机：创建房间 / 加入房间
+    $('btnCreateRoom').addEventListener('click', () => {
+      const name = ($('netName').value || '').trim().slice(0, 10) || '玩家';
+      netEnsure(() => netSend({ t: 'create', name: name }));
+    });
+    $('btnJoinRoom').addEventListener('click', () => {
+      const code = ($('netCode').value || '').trim().toUpperCase();
+      if (code.length !== 4) { View.floater('先输入 4 位房间码', 'var(--red-2)', { info: true }); return; }
+      const name = ($('netName').value || '').trim().slice(0, 10) || '玩家';
+      netEnsure(() => netSend({ t: 'join', code: code, name: name }));
+    });
+    $('netCode').addEventListener('keydown', ev => {
+      if (ev.key === 'Enter') { ev.preventDefault(); $('btnJoinRoom').click(); }
+    });
+
+    // 开始（单机直接开；联机 = 房主发 start，其余人按钮本来就是禁用的）
+    $('btnStart').addEventListener('click', () => {
+      if (App.mode === 'online') {
+        if (App.online && App.online.host) netSend({ t: 'start' });
+        return;
+      }
+      startGame();
+    });
 
     // 音效开关
     $('btnSound').addEventListener('click', () => {
@@ -1372,9 +1507,8 @@
     if (discardTop) {
       discardTop.addEventListener('click', () => {
         if (App.input !== 'touch') return;
-        const G = App.G;
-        if (!G) return;
-        const state = Engine.getState(G);
+        const state = curState();
+        if (!state) return;
         if (!state.discardTop) return;
         discardInspect = state.discardTop;
         App.selectedUid = null;
@@ -1430,6 +1564,255 @@
     });
   }
 
+  /* ---------------- 联机 ---------------- */
+
+  const NET_STORE_KEY = 'bombcats.net';
+  let netQueue = [];          // 排队待播的服务器 update（别人的动作可能在我动画期间到达）
+  let netDraining = false;
+
+  function netSend(msg) {
+    return !!(App.online && App.online.conn && App.online.conn.send(msg));
+  }
+
+  function netSaveSession() {
+    try {
+      sessionStorage.setItem(NET_STORE_KEY, JSON.stringify({
+        code: App.online.code, seat: App.online.seat, token: App.online.token, name: App.online.name
+      }));
+    } catch (e) { /* 隐私模式存不了就算了 */ }
+  }
+
+  function netClearSession() {
+    try { sessionStorage.removeItem(NET_STORE_KEY); } catch (e) { /* 忽略 */ }
+  }
+
+  /** 建立连接（已连上就复用），连接就绪后执行 action（发 create / join） */
+  function netEnsure(action) {
+    if (App.online) {
+      const ready = App.online.conn && App.online.conn.ws && App.online.conn.ws.readyState === 1;
+      if (ready) action();
+      else App.online.pendingOpen.push(action);
+      return;
+    }
+    const wsUrl = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host;
+    App.online = {
+      conn: new root.BombCats.NetConnection(wsUrl, {
+        onOpen: netOnOpen,
+        onMsg: onNetMsg,
+        onClose: (willRetry) => {
+          // 对局中掉线才提示；等待室掉线静默重连
+          if (willRetry && App.online && App.online.state) {
+            View.floater('连接断开，正在重连…', 'var(--red-2)', { info: true });
+          }
+        },
+        onDown: (reason) => netFail(reason || '连接已断开')
+      }),
+      code: null, seat: null, token: null, name: '',
+      state: null, moves: null, host: false,
+      pendingOpen: [action]
+    };
+  }
+
+  /** 连接建立：先执行排队动作（创建/加入）；没有排队动作且持有座位凭据 → 重连 */
+  function netOnOpen() {
+    if (!App.online) return;
+    if (App.online.pendingOpen.length) {
+      const act = App.online.pendingOpen.shift();
+      act();
+    } else if (App.online.code != null) {
+      netSend({ t: 'rejoin', code: App.online.code, seat: App.online.seat, token: App.online.token });
+    }
+  }
+
+  function onNetMsg(msg) {
+    if (!msg || !msg.t) return;
+    switch (msg.t) {
+      case 'created':
+      case 'joined':
+      case 'rejoined':
+        if (!App.online) return;
+        App.online.code = msg.code;
+        App.online.seat = msg.seat;
+        App.online.token = msg.token;
+        App.humanId = msg.seat;
+        netSaveSession();
+        applySetupMode('online');
+        break;
+      case 'lobby':
+        if (!App.online) return;
+        App.online.host = (msg.host === App.online.seat);
+        renderLobby(msg);
+        break;
+      case 'started':
+        if (!App.online) return;
+        enterOnlineGame(msg.state, msg.moves);
+        break;
+      case 'update':
+        onNetUpdate(msg);
+        break;
+      case 'err':
+        if (msg.fatal) { netFail(msg.msg); return; }
+        App.busy = false;
+        View.floater(msg.msg || '操作无效', 'var(--red-2)', { info: true });
+        render();
+        break;
+      case 'seat-gone': {
+        const s = App.online && App.online.state;
+        const p = s && s.players[msg.seat];
+        View.floater((p ? p.name : '有人') + ' 断线了，等待重连…', 'var(--faint)', { info: true });
+        break;
+      }
+      case 'seat-back': {
+        const s2 = App.online && App.online.state;
+        const p2 = s2 && s2.players[msg.seat];
+        View.floater((p2 ? p2.name : '有人') + ' 回来了', 'var(--green)', { info: true });
+        break;
+      }
+      case 'closed':
+        netFail(msg.reason || '房间已解散');
+        break;
+      default:
+        break;
+    }
+  }
+
+  /**
+   * 服务器 update：先换快照再播事件（与离线 runAction 同序）。
+   * 动画期间别人的动作可能继续到达 → 排队串行播，保证事件顺序不被打乱。
+   */
+  function onNetUpdate(msg) {
+    if (!App.online) return;
+    netQueue.push(msg);
+    if (netDraining) return;
+    netDraining = true;
+    drainNetQueue();
+  }
+
+  async function drainNetQueue() {
+    while (netQueue.length && App.online) {
+      const m = netQueue.shift();
+      App.online.state = m.state;
+      App.online.moves = m.moves;
+      // 统计本人出牌数（离线在 runAction 里数，联机从事件流里数）
+      (m.events || []).forEach(e => {
+        if (e.type === 'play' && e.player === App.humanId) App.stats.played++;
+      });
+      App.busy = true;
+      await playEvents(m.events || []);
+      App.busy = false;
+      render();
+    }
+    netDraining = false;
+    const s = App.online && App.online.state;
+    if (s && s.phase === 'over' && !overShown) {
+      overShown = true;
+      await delay(400);
+      showResultPanel(s.winner === App.humanId,
+        s.players[s.winner] ? s.players[s.winner].name : '？', s.turn);
+    }
+  }
+
+  /** 收到 started：用快照接管界面（座位号就是 humanId，全部现有交互直接复用） */
+  function enterOnlineGame(state, moves) {
+    App.humanId = state.you != null ? state.you : App.online.seat;
+    App.online.state = state;
+    App.online.moves = moves;
+    App.selectedUid = null;
+    App.selectedAt = 0;
+    App.newUid = null;
+    App.incomingUid = null;
+    App.lastDrawn = null;
+    App.awaitingTarget = false;
+    App.busy = false;
+    App.stats = { turns: 0, drawn: 0, played: 0, startAt: Date.now() };
+    overShown = false;
+    discardInspect = null;
+    hidePlaceBar();
+    clearBombPlacement();
+
+    View.hideModal('modalSetup');
+    View.hideModal('modalResult');
+    View.resetHand();
+    render();
+  }
+
+  /** 彻底退出联机：断连接、清凭据、清本地状态 */
+  function leaveOnline() {
+    netClearSession();
+    if (App.online && App.online.conn) App.online.conn.close();
+    App.online = null;
+    App.humanId = 0;
+    App.busy = false;
+    App.G = null;
+    netQueue = [];
+    netDraining = false;
+    View.resetHand();
+  }
+
+  /** 联机失败 / 房间解散：回到开局面板并给出原因 */
+  function netFail(reason) {
+    leaveOnline();
+    View.showModal('modalSetup');
+    applySetupMode('local');
+    View.floater(reason, 'var(--red-2)', { info: true });
+  }
+
+  /** 等待室渲染：房间码、玩家列表、开始按钮（只有房主能点） */
+  function renderLobby(lobby) {
+    $('lobbyCode').textContent = lobby.code;
+    const wrap = $('lobbyPlayers');
+    wrap.innerHTML = '';
+    lobby.players.forEach(p => {
+      const chip = document.createElement('span');
+      chip.className = 'lobby-chip' + (p.connected ? '' : ' off');
+      const nm = document.createElement('b');
+      nm.textContent = p.name;
+      chip.appendChild(nm);
+      if (p.seat === lobby.host) {
+        const tag = document.createElement('span');
+        tag.className = 'host-tag';
+        tag.textContent = '房主';
+        chip.appendChild(tag);
+      }
+      if (!p.connected) {
+        const tag = document.createElement('span');
+        tag.className = 'off-tag';
+        tag.textContent = '掉线';
+        chip.appendChild(tag);
+      }
+      wrap.appendChild(chip);
+    });
+    const btn = $('btnStart');
+    if (App.online.host) {
+      btn.disabled = lobby.players.length < 2;
+      btn.textContent = '开始对局（' + lobby.players.length + '/5）';
+    } else {
+      btn.disabled = true;
+      btn.textContent = '等待房主开始…';
+    }
+  }
+
+  /** 开局面板：单机 / 联机视图切换（inLobby 时联机面板换成等待室） */
+  function applySetupMode(mode) {
+    App.mode = mode;
+    const seg = $('setupMode');
+    if (seg) {
+      seg.dataset.value = mode;
+      seg.querySelectorAll('button').forEach(b => b.classList.toggle('on', b.dataset.v === mode));
+    }
+    const inLobby = !!(App.online && App.online.code);
+    const off = $('offlineFields');
+    const net = $('netPanel');
+    const lobby = $('lobbyPanel');
+    if (off) off.style.display = mode === 'local' ? '' : 'none';
+    if (net) net.style.display = (mode === 'online' && !inLobby) ? '' : 'none';
+    if (lobby) lobby.style.display = (mode === 'online' && inLobby) ? '' : 'none';
+    const btn = $('btnStart');
+    if (btn && mode === 'local') { btn.disabled = false; btn.textContent = '开始对局'; }
+  }
+
+
+
   /* ---------------- 启动 ---------------- */
 
   /**
@@ -1469,6 +1852,13 @@
     buildNameInputs(4);
     View.showModal('modalSetup');
     checkAssets();
+    // 页面刷新后自动回到房间（对局中刷新 = 断线重连）。
+    // 凭据留在 sessionStorage 里，netOnOpen 发现没有排队动作且有 code 就自动发 rejoin。
+    let saved = null;
+    try { saved = JSON.parse(sessionStorage.getItem(NET_STORE_KEY) || 'null'); } catch (e) { saved = null; }
+    if (saved && saved.code && saved.token && location.host) {
+      netEnsure(() => netSend({ t: 'rejoin', code: saved.code, seat: saved.seat, token: saved.token }));
+    }
   }
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
