@@ -24,6 +24,27 @@
     }
   }
 
+  /**
+   * 在用户手势的调用栈里同步调用（main.js 的 pointerdown 捕获阶段）：
+   * 提前创建 AudioContext 并 resume。
+   *
+   * iOS/Android 的自动播放策略只允许在手势任务里唤醒音频上下文。
+   * 游戏内的音效全部从 await 之后的异步链里发出（AI 回合、动画回调），
+   * 那时 resume() 会被静默拒绝——表现就是手机上点开对局后全程无声。
+   * 这里在每次触摸/按下的第一时间解锁，后续异步调用才有得播。
+   */
+  function unlock() {
+    if (!enabled) return;
+    try {
+      if (!ctx) {
+        const AC = window.AudioContext || window.webkitAudioContext;
+        if (!AC) { enabled = false; return; }
+        ctx = new AC();
+      }
+      if (ctx.state === 'suspended') ctx.resume();
+    } catch (e) { /* 解锁失败不打断游戏；后续 SFX 调用里的 audio() 还会再试 */ }
+  }
+
   /** 单个音符：频率、时长、波形、音量、延迟 */
   function tone(freq, dur, type, vol, delay) {
     const a = audio();
@@ -121,5 +142,5 @@
 
   function isEnabled() { return enabled; }
 
-  root.BombCats = Object.assign(root.BombCats || {}, { SFX, setSoundEnabled: setEnabled, isSoundEnabled: isEnabled });
+  root.BombCats = Object.assign(root.BombCats || {}, { SFX, setSoundEnabled: setEnabled, isSoundEnabled: isEnabled, unlockAudio: unlock });
 })(typeof window !== 'undefined' ? window : globalThis);

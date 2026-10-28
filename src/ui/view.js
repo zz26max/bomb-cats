@@ -320,6 +320,21 @@
   }
 
   /**
+   * 洗牌动效：牌堆四层卡背分两半错开再交错回位（riffle），
+   * 数字跟着晃。class 由 CSS 卸下（.64s 动画 + 余量）。
+   * 与 .bump 互斥：洗牌时不需要「被抽走一张」的顿挫。
+   */
+  function shufflePile() {
+    const stack = el.pileStack;
+    if (!stack) return;
+    stack.classList.remove('bump', 'shuffling');
+    void stack.offsetWidth;
+    stack.classList.add('shuffling');
+    clearTimeout(stack._shufTimer);
+    stack._shufTimer = setTimeout(() => stack.classList.remove('shuffling'), 760);
+  }
+
+  /**
    * 牌堆现在能不能「点一下就抽牌」。
    * 只负责视觉与提示（.can-draw 的呼吸光晕 / cursor / title），
    * 真正的判定在 main.js 的 canHumanDraw()，两边用同一套条件。
@@ -920,10 +935,29 @@
 
   /* ---------------- 特效 ---------------- */
 
-  /** 中央飘字 */
-  function floater(text, color) {
+  /**
+   * 舞台中央的事件横幅。
+   * 三种用法：
+   *   floater('洗牌', color, { sub: '牌堆已重洗' })   → 大字主词 + 副词条（游戏事件）
+   *   floater('还没轮到你', color, { info: true })    → 紧凑小字（提示 / 错误）
+   *   floater('BOOM', color)                          → 只有主词
+   * 内容全部是内部写死的字符串，用 DOM 拼装，不走 innerHTML。
+   */
+  function floater(text, color, opts) {
+    const o = opts || {};
     const f = el.floater;
-    f.textContent = text;
+    f.innerHTML = '';
+    const main = document.createElement('div');
+    main.className = 'f-main';
+    main.textContent = text;
+    f.appendChild(main);
+    if (o.sub) {
+      const sub = document.createElement('div');
+      sub.className = 'f-sub';
+      sub.textContent = o.sub;
+      f.appendChild(sub);
+    }
+    f.classList.toggle('info', !!o.info);
     f.style.color = color || 'var(--gold-2)';
     f.classList.remove('show');
     void f.offsetWidth;          // 强制重排以重启动画
@@ -1099,7 +1133,7 @@
       el, createCard, createPeekCard,
       renderOpponents, renderStage, renderHand, setPrompt, renderLog,
       floater, shake, flash, burst, burstAtPlayer, pulsePlayer, showPeek,
-      showDrawnCard, showOpponentDraw, bumpDeck, boomAt, boomAtPlayer, catArt, ASSET,
+      showDrawnCard, showOpponentDraw, bumpDeck, shufflePile, boomAt, boomAtPlayer, catArt, ASSET,
       setPileDrawable, pulseTurnCue, resetHand,
       showPlaceMarker, hidePlaceMarker, placeMarkerText,
       layoutFan, handCardAt, refreshHandLayout,

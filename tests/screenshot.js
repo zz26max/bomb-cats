@@ -304,6 +304,7 @@ window.addEventListener('load', function () {
     var appEl = document.querySelector('.app');
     if (appEl) appEl.classList.add('touch-input');
     G.current = App.humanId;
+    G.players[G.current].isAI = false;   // 竞态防护：防止开局随到 AI 时定时器抢回合（详见 targetScript）
     App.busy = false;
     // 保证手里有一张无需目标、可直接出的牌
     var me = G.players[App.humanId];
@@ -456,6 +457,73 @@ window.addEventListener('load', function () {
 });
 `;
 
+/* ---- 驱动脚本 8：手机目标栏（选中需要目标的牌；触摸路径选中即进入选目标） ---- */
+const targetScript = `
+window.addEventListener('load', function () {
+  setTimeout(async function () {
+    function wait(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+    document.getElementById('btnStart').click();
+    await wait(900);
+    var BC = window.BombCats, App = BC.App, G = App.G;
+    if (!G) { document.title = 'MOBILE_READY'; return; }
+    App.input = 'touch';
+    var appEl = document.querySelector('.app');
+    if (appEl) appEl.classList.add('touch-input');
+    G.current = App.humanId;
+    // 竞态防护：开局首随机到 AI 时，scheduleAIIfNeeded 的定时器会在截图前开跑，
+    // 把 G.current 抢回去（legalMoves 变空、说明条显示「现在不能出」）。
+    // 把当前座位的 isAI 摘掉，driveAI 触发时会直接 return，状态就此定格。
+    G.players[G.current].isAI = false;
+    App.busy = false;
+    // 保证手里有一张需要目标的牌（求饶），且至少两个对手可被指定
+    var me = G.players[App.humanId];
+    me.hand.push({ uid: 990002, type: 'favor', name: BC.CARDS.favor.name, glyph: BC.CARDS.favor.glyph, kind: 'action' });
+    G.players.forEach(function (p) {
+      if (p.id !== App.humanId && p.hand.length < 2) p.hand.push({ uid: 800000 + p.id, type: 'skip', name: '跳过', glyph: '⏭️', kind: 'action' });
+    });
+    App.render();
+    await wait(150);
+    // 模拟触摸 pointerup 的新行为：选中 need-target 牌时直接 awaitingTarget = true
+    App.selectedUid = 990002;
+    App.selectedAt = Date.now();
+    App.awaitingTarget = true;
+    App.render();
+    for (var i = 0; i < 40 && App.busy; i++) await wait(100);
+    await wait(450);
+    document.title = 'MOBILE_READY';
+  }, 150);
+});
+`;
+
+/* ---- 驱动脚本 9：事件横幅 + 洗牌动效（触发后冻结动画中段，供截图验收） ---- */
+const floaterScript = `
+window.addEventListener('load', function () {
+  setTimeout(async function () {
+    function wait(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+    document.getElementById('btnStart').click();
+    // 竞态防护：AI 回合的事件横幅会在冻结前覆盖我们触发的这条（此前抓到过）
+    var G = window.BombCats.App.G;
+    if (G) G.players[G.current].isAI = false;
+    await wait(1100);
+    var BC = window.BombCats;
+    BC.App.busy = false;
+    BC.View.floater('洗牌', 'var(--gold)', { sub: '牌堆已重洗' });
+    BC.View.shufflePile();
+    // 确定性冻结：等动画注册后，用 WAAPI 暂停并跳到 riffle 第一峰（180ms）/横幅成形（190ms）。
+    // 不用「真实等待 + 全局暂停」——overshoot 缓动前段极快，真实时序很难掐准（已踩过坑）。
+    await wait(60);
+    var anims = document.getAnimations ? document.getAnimations() : [];
+    Array.prototype.forEach.call(anims, function (a) {
+      var n = a.animationName || '';
+      if (n === 'riffleA' || n === 'riffleB' || n === 'badgeJitter' || n === 'floatUp') {
+        try { a.pause(); a.currentTime = (n === 'floatUp') ? 190 : 180; } catch (e) {}
+      }
+    });
+    document.title = 'MOBILE_READY';
+  }, 150);
+});
+`;
+
 console.log('\n生成截图 → ' + outDir + '\n');
 
 (async function main() {
@@ -471,13 +539,17 @@ console.log('\n生成截图 → ' + outDir + '\n');
     const mobileFile = makeDriven('_driven-mobile.html', mobileScript);
     const inspectFile = makeDriven('_driven-mobile-inspect.html', inspectScript);
     const placeFile = makeDriven('_driven-mobile-place.html', placeScript);
+    const targetFile = makeDriven('_driven-mobile-target.html', targetScript);
+    const floaterFile = makeDriven('_driven-floater.html', floaterScript);
     const shots = [
       ['06-mobile-390.png', mobileFile, 390, 844],
       ['07-mobile-360.png', mobileFile, 360, 640],
       ['08-mobile-430.png', mobileFile, 430, 932],
       ['09-mobile-360short.png', mobileFile, 360, 560],   // 触发矮屏档 max-height:620
       ['10-mobile-390-inspect.png', inspectFile, 390, 844],  // 说明条展开（选中可出的牌）
-      ['11-mobile-390-place.png', placeFile, 390, 844]       // 放置条展开（炸弹放回）
+      ['11-mobile-390-place.png', placeFile, 390, 844],      // 放置条展开（炸弹放回）
+      ['12-mobile-390-target.png', targetFile, 390, 844],    // 目标栏（触摸选中即选目标）
+      ['13-floater-shuffle.png', floaterFile, 390, 844]      // 事件横幅 + 洗牌 riffle（冻结帧）
     ];
     const chrome = await launchCdpChrome();
     const browser = await cdpConnect(chrome.browserWs);

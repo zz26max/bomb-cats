@@ -683,6 +683,40 @@ body {
   100% { transform: scale(1); }
 }
 
+/* ---------- 洗牌：牌堆 riffle（分两半错开 → 交错回位） ----------
+   动的是独立属性 translate / rotate，不碰 transform——
+   每层的 transform 上还写着基础错位（3px/2px/1px），动画叠加在其上。
+   四层各配延迟与不同轨迹，产生「哗啦一下乱掉再归位」的混乱感。 */
+.pile-stack.shuffling .layer { animation-duration: .64s; animation-timing-function: cubic-bezier(.3, 1.25, .45, 1); animation-fill-mode: both; }
+.pile-stack.shuffling .layer:nth-child(1) { animation-name: riffleA; animation-delay: 0ms; }
+.pile-stack.shuffling .layer:nth-child(2) { animation-name: riffleB; animation-delay: 50ms; }
+.pile-stack.shuffling .layer:nth-child(3) { animation-name: riffleB; animation-delay: 100ms; }
+.pile-stack.shuffling .layer:nth-child(4) { animation-name: riffleA; animation-delay: 150ms; }
+
+@keyframes riffleA {
+  0%   { translate: 0 0;      rotate: 0deg; }
+  28%  { translate: -14px -6px; rotate: -8deg; }
+  55%  { translate: 11px -3px;  rotate: 6deg; }
+  78%  { translate: -6px -1px;  rotate: -3deg; }
+  100% { translate: 0 0;      rotate: 0deg; }
+}
+@keyframes riffleB {
+  0%   { translate: 0 0;     rotate: 0deg; }
+  28%  { translate: 14px -5px; rotate: 8deg; }
+  55%  { translate: -11px -4px; rotate: -6deg; }
+  78%  { translate: 5px -1px;   rotate: 3deg; }
+  100% { translate: 0 0;     rotate: 0deg; }
+}
+
+/* 牌堆数字跟着晃一下，强化「整堆都被搅过」 */
+.pile-stack.shuffling .badge-num { animation: badgeJitter .64s ease both; }
+@keyframes badgeJitter {
+  0%, 100% { translate: 0 0; }
+  30%      { translate: -3px -2px; }
+  60%      { translate: 3px -1px; }
+  80%      { translate: -1px 0; }
+}
+
 /* 抽到的牌摊在台面中央。
    进场用动画，停留与淡出用 transition——
    如果把淡出写进 keyframe，调用方就没法「多停留一会儿」了。 */
@@ -781,28 +815,81 @@ body {
 
 .prompt b { color: var(--txt); }
 
-/* 舞台中央飘出的结算文字 */
+/* 舞台中央飘出的事件横幅。
+   游戏事件反馈的通行做法（WoW/炉石一路传下来的）：
+   主词大号粗体大字距 + 描边阴影 + 颜色编码，副词条小字补充——
+   不用 emoji 拼句子，「洗牌」两个字本身就比「🌀 洗牌」更像游戏。 */
 .floater {
   position: absolute;
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
-  font-size: 34px;
-  font-weight: 900;
-  letter-spacing: .06em;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 7px;
   pointer-events: none;
   opacity: 0;
   z-index: 40;
-  text-shadow: 0 6px 26px rgba(0,0,0,.9);
   white-space: nowrap;
 }
 
-.floater.show { animation: floatUp 1.25s cubic-bezier(.2,.8,.3,1) forwards; }
+/* 主词：两侧装饰线用伪元素画，跟着 currentColor 变 */
+.floater .f-main {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  font-size: 42px;
+  font-weight: 900;
+  letter-spacing: .2em;
+  text-indent: .2em;          /* 抵消最后一个字的字距，保证视觉居中 */
+  color: var(--gold-2);       /* JS 会按事件类型覆盖 */
+  text-shadow:
+    0 2px 0 rgba(0, 0, 0, .85),
+    0 8px 30px rgba(0, 0, 0, .95),
+    0 0 26px rgba(0, 0, 0, .6);
+  font-family: "Noto Serif SC", "SimSun", "Segoe UI", serif;
+}
+
+.floater .f-main::before,
+.floater .f-main::after {
+  content: "";
+  width: 30px;
+  height: 3px;
+  border-radius: 2px;
+  background: currentColor;
+  opacity: .5;
+  flex: none;
+}
+
+/* 副词条：小字补充说明 */
+.floater .f-sub {
+  font-size: 13px;
+  letter-spacing: .3em;
+  text-indent: .3em;
+  color: var(--txt);
+  text-shadow: 0 2px 8px rgba(0, 0, 0, .95);
+}
+
+/* 信息模式（概率提示 / 错误 / 引导语）：紧凑小字，不抢戏 */
+.floater.info .f-main {
+  font-size: 19px;
+  letter-spacing: .1em;
+  text-indent: .1em;
+  gap: 10px;
+  font-family: inherit;
+}
+.floater.info .f-main::before,
+.floater.info .f-main::after { width: 14px; height: 2px; }
+.floater.info .f-sub { font-size: 12px; letter-spacing: .12em; text-indent: 0; }
+
+/* 章戳式入场：大而虚 → 实而正 → 上浮淡出 */
+.floater.show { animation: floatUp 1.3s cubic-bezier(.2, .8, .3, 1) forwards; }
 @keyframes floatUp {
-  0%   { opacity: 0; transform: translate(-50%, -30%) scale(.7); }
-  18%  { opacity: 1; transform: translate(-50%, -50%) scale(1.08); }
-  70%  { opacity: 1; transform: translate(-50%, -66%) scale(1); }
-  100% { opacity: 0; transform: translate(-50%, -96%) scale(.96); }
+  0%   { opacity: 0; transform: translate(-50%, -44%) scale(1.55); filter: blur(7px); }
+  16%  { opacity: 1; transform: translate(-50%, -50%) scale(1);    filter: blur(0);  }
+  70%  { opacity: 1; transform: translate(-50%, -58%) scale(1); }
+  100% { opacity: 0; transform: translate(-50%, -88%) scale(.95); }
 }
 
 /* 预测未来：三张牌的浮层 */
@@ -2074,9 +2161,16 @@ details.rules .body code {
   }
   #inspect .i-target .t-count { font-size: 10px; color: var(--dim); }
 
-  /* 说明条出现时压掉提示条（保留布局，只改透明度，避免跳动） */
-  .stage .prompt { transition: opacity 120ms ease; }
-  .stage.inspecting .prompt { opacity: 0; }
+  /* 说明条出现时提示条挪到说明条上方并保持可见——
+     触摸端靠这行字告诉玩家「再点一次这张牌」/「点选一个对手」（文案由 main.js 写）。
+     只读说明时 JS 不覆盖文案，显示的还是回合提示，同样不碍事。 */
+  .stage .prompt { transition: opacity 120ms ease, bottom 160ms ease, border-color 160ms ease; }
+  .stage.inspecting .prompt {
+    bottom: 88px;
+    opacity: 1;
+    border-color: rgba(217, 176, 97, .45);
+    color: var(--gold-2);
+  }
 
   /* ---------- 手牌区 + 按钮行：两行网格 ---------- */
   .handzone {
@@ -2141,12 +2235,12 @@ details.rules .body code {
     translate: var(--x, 0px) calc(var(--lift, 0px) - 22px);
     scale: 1.10;
   }
-  .floater {
-    font-size: 18px;
-    white-space: normal;
-    max-width: 90%;
-    text-align: center;
-  }
+  .floater .f-main { font-size: 25px; gap: 10px; }
+  .floater .f-main::before,
+  .floater .f-main::after { width: 18px; }
+  .floater .f-sub { font-size: 11px; }
+  .floater.info .f-main { font-size: 15px; }
+  .floater { max-width: 92%; }
   .logpanel { display: none; }
   .result-stats { gap: 6px; }
   .stat .v { font-size: 16px; }

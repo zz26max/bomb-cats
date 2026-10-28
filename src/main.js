@@ -19,7 +19,7 @@
     humanId: 0,          // 真人座位；-1 表示纯观战
     difficulty: 'normal',
     selectedUid: null,   // 当前选中的手牌
-    selectedAt: 0,       // 最近一次触摸选中的时间戳（≥300ms 后再点同一张才算确认出牌）
+    selectedAt: 0,       // 最近一次触摸选中的时间戳（≥200ms 后再点同一张才算确认出牌）
     input: 'mouse',      // 输入类型：只认 pointerdown 记下的 pointerType（mouse / touch）
     newUid: null,        // 刚抽到的那张牌，用于在手牌里高亮
     incomingUid: null,   // 正从牌堆飞向手牌、还没落地的那张（先隐形占位）
@@ -31,6 +31,17 @@
   };
 
   const delay = ms => new Promise(r => setTimeout(r, ms));
+
+  /**
+   * 触觉反馈：只在支持的设备生效（Android 手机的浏览器；iOS 会忽略，无副作用）。
+   * 只用在分量最重的时刻——爆炸、拆弹、被攻击、胜负——抽牌这类高频动作不震，
+   * 否则很快就烦了。
+   */
+  function buzz(pattern) {
+    if (root.navigator && typeof root.navigator.vibrate === 'function') {
+      try { root.navigator.vibrate(pattern); } catch (e) { /* 忽略 */ }
+    }
+  }
 
   /**
    * 真人现在能不能「直接抽牌」。
@@ -109,9 +120,11 @@
       }
     } else if (state.current === myId) {
       const n = state.pendingDraws;
+      // 触摸端没有键盘，「按空格」的提示只留给鼠标
+      const kb = (App.input === 'mouse' && (root.innerWidth || 0) > 620) ? '（或按空格）' : '';
       View.setPrompt(n > 1
         ? '轮到你 · 被攻击，本回合要抽 <b>' + n + '</b> 张（点击牌堆）'
-        : '轮到你 · 出牌后点击牌堆（或按空格）抽牌', false);
+        : '轮到你 · 出牌后点击牌堆' + kb + '抽牌', false);
     } else {
       View.setPrompt('<b>' + state.players[state.current].name + '</b> 的回合…', false);
     }
@@ -289,52 +302,65 @@
         case 'peek':
           SFX.peek();
           if (e.player === App.humanId) View.showPeek(e.cards);
-          else View.floater('🔮 预测未来', 'var(--blue)');
+          else View.floater('预测未来', 'var(--blue)');
           await delay(e.player === App.humanId ? 300 : 420);
           break;
         case 'shuffle':
           SFX.shuffle();
-          View.floater('🌀 洗牌', 'var(--purple)');
-          await delay(360);
+          View.shufflePile();
+          View.floater('洗牌', 'var(--gold)', { sub: '牌堆已重洗' });
+          await delay(680);
           break;
-        case 'attack':
+        case 'attack': {
           SFX.attack();
-          View.floater('⚔️ 攻击！', 'var(--red-2)');
-          if (e.victim != null) View.pulsePlayer(e.victim, 'hit');
+          const victimName = (e.victim != null && App.G.players[e.victim]) ? App.G.players[e.victim].name : null;
+          View.floater('攻击', 'var(--red-2)', { sub: victimName ? '「' + victimName + '」要连抽 2 张' : undefined });
+          if (e.victim != null) {
+            View.pulsePlayer(e.victim, 'hit');
+            if (e.victim === App.humanId) buzz([40, 60, 40]);
+          }
           await delay(420);
           break;
+        }
         case 'transfer':
           SFX.transfer();
           View.pulsePlayer(e.from, 'hit');
-          View.floater('🔄 转移一张牌', 'var(--gold)');
+          View.floater('转移', 'var(--gold-2)', { sub: '一张牌换了主人' });
           await delay(360);
           break;
         case 'nope':
         case 'cancel':
           SFX.nope();
-          View.floater('🚫 否决！', 'var(--red-2)');
+          View.floater('否决', 'var(--red-2)', { sub: '上一张牌无效' });
           await delay(360);
           break;
         case 'defuse':
           SFX.defuse();
-          View.floater('✂️ 拆除成功', 'var(--green)');
+          View.floater('拆除成功', 'var(--green)', { sub: '危机解除' });
+          if (e.player === App.humanId) buzz(30);
           await delay(400);
           break;
         case 'place-bomb':
           SFX.click();
           break;
-        case 'explode':
+        case 'explode': {
           SFX.explode();
+          const boomName = App.G.players[e.player] ? App.G.players[e.player].name : '';
+          View.floater('BOOM', 'var(--red-2)', { sub: boomName ? boomName + ' 炸出局' : undefined });
+          if (e.player === App.humanId) buzz([60, 40, 90]);
           View.flash();
           View.shake();
           View.boomAtPlayer(e.player);        // 12 帧手绘爆炸精灵
           View.burstAtPlayer(e.player);       // 叠加粒子碎屑
           View.pulsePlayer(e.player, 'blasted');
-          View.floater('BOOM！', 'var(--red-2)');
           await delay(820);
           break;
+        }
         case 'reshuffle':
           SFX.shuffle();
+          View.shufflePile();
+          View.floater('洗牌', 'var(--gold)', { sub: '弃牌堆重新洗入' });
+          await delay(680);
           break;
         case 'gameover':
           await delay(240);
@@ -364,7 +390,7 @@
     } catch (err) {
       App.busy = false;
       console.error(err);
-      View.floater('出错了：' + err.message, 'var(--red-2)');
+      View.floater('出错了：' + err.message, 'var(--red-2)', { info: true });
       return { ok: false };
     }
 
@@ -402,7 +428,7 @@
       render();
       const lm = Engine.legalMoves(G, App.humanId);
       const hit = lm.needTarget.find(m => m.cardUid === uid);
-      View.floater('选择一名对手', 'var(--gold)');
+      View.floater('选择一名对手', 'var(--gold)', { info: true });
       if (!hit || !hit.targets.length) {
         App.awaitingTarget = false;
         App.selectedUid = null;
@@ -428,6 +454,9 @@
   /** 真人结束回合（抽牌） */
   async function humanEndTurn() {
     const G = App.G;
+    // 点击的一瞬先收掉牌堆的「可抽」光晕：光晕由 render() 管理，
+    // 而下一次 render 要等抽牌动画播完才跑，不收的话点击后它还会再闪一秒
+    View.setPileDrawable(false);
     const r = await runAction(() => Engine.endTurn(G, App.humanId));
     if (!r.ok) return;
     if (r.needsPlacement) { await handlePlacementIfNeeded(); return; }
@@ -611,7 +640,10 @@
 
   function removeTargetButtons(el) {
     Array.from(el.children || []).forEach(c => {
-      if (c.classList && c.classList.contains('i-target')) el.removeChild(c);
+      if (!c.classList) return;
+      // i-cancel 也要收：renderInspect 每次 render 都会重跑，
+      // 只清 i-target 的话「取消」按钮会一个个累积（截图验收里抓到的）
+      if (c.classList.contains('i-target') || c.classList.contains('i-cancel')) el.removeChild(c);
     });
   }
 
@@ -683,6 +715,14 @@
     el.classList.toggle('show', show);
     el.classList.toggle('targeting', mode === 'target');
     if (stage) stage.classList.toggle('inspecting', show);
+
+    // 触摸端没有 hover，选中之后「下一步点哪」全靠这一行字：
+    // 说明条出现时把提示条挪到说明条上方（CSS 的 .stage.inspecting），这里写引导文案。
+    // 只读说明（弃牌堆）不需要引导，保留 render() 写的回合提示。
+    if (show) {
+      if (mode === 'target') View.setPrompt('点选一个对手（或点下方按钮）', false);
+      else if (!inspectInfo.readonly && inspectInfo.canPlay) View.setPrompt('再点一次这张牌，或点「出牌」', false);
+    }
 
     if (!show) {
       removeTargetButtons(el);
@@ -808,7 +848,7 @@
     clearBombPlacement();
     const r = Engine.placeBomb(App.G, App.humanId, pos);
     if (r.ok) {
-      View.floater('🗨️ 炸弹已放回', 'var(--red-2)');
+      View.floater('炸弹已放回', 'var(--red-2)');
       await playEvents(r.events);
     }
     await afterPlacement();
@@ -940,8 +980,10 @@
 
     await delay(500);
     const win = G.winner === App.humanId;
-    if (win) { SFX.win(); View.burst(window.innerWidth / 2, window.innerHeight / 2, 70, ['#f3d79a', '#d9b061', '#fff0d0', '#ffd39b']); }
-    else SFX.lose();
+    if (win) {
+      SFX.win(); buzz([40, 60, 40, 60, 100]);
+      View.burst(window.innerWidth / 2, window.innerHeight / 2, 70, ['#f3d79a', '#d9b061', '#fff0d0', '#ffd39b']);
+    } else { SFX.lose(); buzz(120); }
 
     const winnerName = G.players[G.winner] ? G.players[G.winner].name : '？';
     // 胜利用庆祝插画，失败用出局插画（单文件版会走内联数据）
@@ -1059,6 +1101,9 @@
       App.input = isTouch ? 'touch' : 'mouse';
       const appEl = document.querySelector('.app');
       if (appEl) appEl.classList.toggle('touch-input', isTouch);
+      // 音频必须在手势调用栈里解锁（见 audio.js 的 unlock 注释）；
+      // 重复调用是廉价的（ctx 已 running 时只是一次状态读取）
+      SFX.unlockAudio();
     }, true);
 
     // 手牌点击：出牌 或 选中需要目标的牌
@@ -1081,7 +1126,7 @@
       const uid = parseInt(cardEl.dataset.uid, 10);
 
       if (!cardEl.classList.contains('playable')) {
-        View.floater('这张牌现在不能出', 'var(--faint)');
+        View.floater('这张牌现在不能出', 'var(--faint)', { info: true });
         return;
       }
       // 再次点击已选中的牌 → 取消选择
@@ -1142,15 +1187,22 @@
       if (!G || G.phase !== 'playing' || G.current !== App.humanId || App.busy) return;
 
       if (App.selectedUid === uid) {
-        // 再点一次 = 确认出牌；距上次选中不足 300ms 的连点不算（防抖）
-        if (Date.now() - App.selectedAt < 300) return;
+        // 再点一次 = 确认出牌；距上次选中不足 200ms 的连点不算（防误触双击）。
+        // 曾经是 300ms：自然的两连击常落在 200~300ms 区间，第二击被吞掉，
+        // 手感就是「点了没反应」，所以压到 200ms。
+        if (Date.now() - App.selectedAt < 200) return;
         if (cardEl.classList.contains('playable')) humanPlayCard(uid);
         return;
       }
-      // 换选另一张：只选中，不出牌（需要目标的牌也不进入选目标）
+      // 换选另一张：只选中，不出牌
       App.selectedUid = uid;
       App.selectedAt = Date.now();
-      App.awaitingTarget = false;
+      // 需要目标的牌：选中即进入选目标（对手区高亮 + 说明条切目标栏），
+      // 省掉「先选中 → 再点『选目标』」的中间一步；取消走目标栏的「取消」按钮
+      const picked = G.players[App.humanId].hand.find(c => c.uid === uid);
+      App.awaitingTarget = !!(picked &&
+        CARDS[picked.type].need === 'player' &&
+        cardEl.classList.contains('playable'));
       render();
     });
 
@@ -1194,13 +1246,14 @@
     $('btnHint').addEventListener('click', () => {
       const G = App.G;
       if (!G) return;
-      if (G.current !== App.humanId) { View.floater('还没轮到你', 'var(--faint)'); return; }
+      if (G.current !== App.humanId) { View.floater('还没轮到你', 'var(--faint)', { info: true }); return; }
       const risk = AI.bombRisk(G, App.humanId);
       const lm = Engine.legalMoves(G, App.humanId);
       const n = lm.playable.length + lm.needTarget.length;
       View.floater(
         '抽到炸弹概率约 ' + Math.round(risk * 100) + '% · 可出 ' + n + ' 张牌',
-        risk > 0.35 ? 'var(--red-2)' : 'var(--gold)'
+        risk > 0.35 ? 'var(--red-2)' : 'var(--gold)',
+        { info: true }
       );
     });
 

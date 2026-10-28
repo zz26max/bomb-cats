@@ -68,7 +68,14 @@ window.addEventListener('load', function () {
       await wait(700);
       var after = handIds().length;
       ok('点击手牌能正常出牌', played !== null, '打出了 ' + played);
-      ok('出牌后手牌减少', after === before - 1, before + '->' + after);
+      // 「摸两张」是 -1+2=净 +1，其余牌都是 -1；攻击的队列检查也要在结束回合前做
+      // （等 1100ms 再查 pendingDraws 会被 AI 的回合抢跑，随机翻车）
+      var handDelta = (played === 'draw2') ? 1 : -1;
+      ok('出牌后手牌数量正确', after === before + handDelta, before + '->' + after);
+      if (played === 'attack') {
+        ok('打出攻击后攻击队列挂起（下家要抽 2 次）',
+          App.G.attackQueue === 2, 'attackQueue=' + App.G.attackQueue);
+      }
       ok('出牌进入弃牌堆', App.G.discard.length > 0, 'discard=' + App.G.discard.length);
 
       // 3. 结束回合 → 抽牌结算。
@@ -79,13 +86,10 @@ window.addEventListener('load', function () {
       await wait(1100);
 
       if (noDrawCard) {
-        // 打出跳过后本回合不抽牌，牌堆不变；打出攻击则下家要抽 2 张
+        // 打出跳过后本回合不抽牌，牌堆不变；攻击的队列已在上面查过 attackQueue
+        // （这里的 pendingDraws 会被 AI 回合随时改写，不再适合延时断言）
         ok('打出「' + played + '」后本回合不抽牌（规则正确）',
           App.G.deck.length === deckBefore, deckBefore + '->' + App.G.deck.length);
-        if (played === 'attack') {
-          ok('攻击让下家需要抽 2 张', App.G.pendingDraws === 2,
-            'pendingDraws=' + App.G.pendingDraws);
-        }
       } else {
         ok('结束回合后确实抽了牌', App.G.deck.length < deckBefore,
           deckBefore + '->' + App.G.deck.length);
@@ -100,11 +104,17 @@ window.addEventListener('load', function () {
           flashText ? flashText.textContent : '没渲染');
 
         var marked = document.querySelectorAll('#hand .card.newly-drawn').length;
-        ok('手牌里高亮了刚抽到的那一张', marked === 1, marked + ' 张被标记');
+        if (App.lastDrawn && App.lastDrawn.kind === 'bomb') {
+          // 抽到炸弹（已被拆除）：炸弹不进手牌，手上不该有任何「新」高亮。
+          // 没写这个分支时，约 1/8 的对局抽到炸弹会让下面两条断言随机翻车。
+          ok('抽到炸弹时手牌没有新手牌高亮', marked === 0, marked + ' 张被标记');
+        } else {
+          ok('手牌里高亮了刚抽到的那一张', marked === 1, marked + ' 张被标记');
 
-        var badge = document.querySelector('#hand .card.newly-drawn');
-        ok('高亮的那张牌与抽牌记录一致',
-          !!badge && parseInt(badge.dataset.uid, 10) === App.newUid);
+          var badge = document.querySelector('#hand .card.newly-drawn');
+          ok('高亮的那张牌与抽牌记录一致',
+            !!badge && parseInt(badge.dataset.uid, 10) === App.newUid);
+        }
       }
 
       // 4. 需要目标的牌：造一张「帮忙」，验证瞄准态与选择目标
@@ -115,6 +125,18 @@ window.addEventListener('load', function () {
       }
       App.busy = false;
       App.G.current = App.humanId;
+      // 前面的随机对局可能已经分出胜负（有人抽弹出局）——这里恢复成「进行中」，
+      // 否则 legalMoves 恒为空，选目标断言必然是 0 个（间歇翻车点）
+      App.G.phase = 'playing';
+      App.G.winner = null;
+      App.G.players.forEach(function (p) {
+        p.alive = true;
+        if (p.id !== App.humanId) {
+          while (p.hand.length < 2) {
+            p.hand.push({ uid: 800000 + p.id * 10 + p.hand.length, type: 'skip', name: '跳过', glyph: '⏭️', kind: 'action' });
+          }
+        }
+      });
       var me = App.G.players[App.humanId];
       me.hand.push({ uid: 999001, type: 'help', name: '帮忙', glyph: '🤝', kind: 'action' });
       App.G.players.forEach(function (p) {
