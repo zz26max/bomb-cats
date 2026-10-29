@@ -304,6 +304,13 @@ body {
 /* 出局贴纸：素材 SVG 直接盖在头像上，不再用伪元素写字 */
 .opponent.dead::after { content: none; }
 
+/* 出局的瞬间：向后倒下 + 褪色（活→死的那一次渲染由 view.js 挂 .dying） */
+.opponent.dying { animation: oppFall .62s cubic-bezier(.35,.6,.3,1) both; }
+@keyframes oppFall {
+  0%   { transform: translateY(0) rotate(0)    scale(1);   opacity: 1;   filter: none; }
+  100% { transform: translateY(7px) rotate(-7deg) scale(.94); opacity: .45; filter: grayscale(.7); }
+}
+
 .opp-avatar {
   position: relative;
   width: 52px;
@@ -764,21 +771,23 @@ body {
   transform: translate(-50%, -50%) scale(1);
 }
 
-/* 抽到的牌放大一点，确保看得清 */
+/* 抽到的牌放大一点，确保看得清。
+   揭晓用 3D 翻面：侧立 → 翻正 → 微回弹，配合卡背飞入读起来才是「翻开一张新牌」，
+   而不是凭空弹出一帧。 */
 .draw-flash .card.draw-face {
   width: 116px;
   height: 162px;
   cursor: default;
-  animation: drawPop .42s cubic-bezier(.2,.9,.3,1);
+  animation: drawFlip .5s cubic-bezier(.2,.7,.3,1);
 }
 .draw-flash .card.draw-face .glyph { font-size: 34px; margin: 8px 0 5px; }
 .draw-flash .card.draw-face .cname { font-size: 13.5px; margin-bottom: 4px; }
 .draw-flash .card.draw-face .ctext { font-size: 9px; }
 
-@keyframes drawPop {
-  0%   { transform: scale(.72) rotate(-5deg); }
-  60%  { transform: scale(1.06) rotate(0deg); }
-  100% { transform: scale(1) rotate(0deg); }
+@keyframes drawFlip {
+  0%   { transform: perspective(760px) rotateY(-97deg) scale(.86); }
+  55%  { transform: perspective(760px) rotateY(9deg)   scale(1.05); }
+  100% { transform: perspective(760px) rotateY(0)      scale(1); }
 }
 
 /* 对手抽牌：卡片轻微晃动，暗示「他拿走了一张」 */
@@ -942,7 +951,8 @@ body {
   border: 1px solid var(--line);
   background: var(--panel);
   font-size: 12px;
-  transition: border-color .25s ease, box-shadow .25s ease, background .25s ease;
+  transition: border-color .25s ease, box-shadow .25s ease, background .25s ease,
+              opacity .45s ease, filter .45s ease, transform .45s ease;
 }
 
 /* 自己的猫头像 */
@@ -1108,7 +1118,8 @@ body {
     scale 140ms cubic-bezier(.3,1.4,.5,1);
 }
 
-/* hover：由 main.js 的指针命中判定切 .is-hover（重叠时 CSS :hover 命中不准） */
+/* hover：由 main.js 的指针命中判定切 .is-hover（重叠时 CSS :hover 命中不准）。
+   缓动带 overshoot（y1=1.5）：抬起时先冲过头再弹回，手感是「弹簧」而不是「匀速滑」。 */
 .hand > .card.is-hover {
   translate: var(--x, 0px) calc(var(--lift, 0px) - 22px);
   rotate: calc(var(--rot, 0) * 0.6deg);
@@ -1120,17 +1131,17 @@ body {
     0 0 0 2px rgba(245,196,95,.85),
     0 0 24px rgba(245,196,95,.35);
   transition:
-    translate 160ms cubic-bezier(.4,0,.2,1),
-    rotate 160ms cubic-bezier(.4,0,.2,1),
-    scale 160ms cubic-bezier(.4,0,.2,1);
+    translate 240ms cubic-bezier(.3,1.5,.4,1),
+    rotate 240ms cubic-bezier(.3,1.5,.4,1),
+    scale 240ms cubic-bezier(.3,1.5,.4,1);
 }
 
-/* 可出的牌 hover 时：缩放回弹仍然是 140ms，按下抬起才不会发闷 */
+/* 可出的牌 hover 时：scale 的回弹略快于位移，按下抬起才不会发闷 */
 .hand > .card.playable.is-hover {
   transition:
-    translate 160ms cubic-bezier(.4,0,.2,1),
-    rotate 160ms cubic-bezier(.4,0,.2,1),
-    scale 140ms cubic-bezier(.3,1.4,.5,1);
+    translate 240ms cubic-bezier(.3,1.5,.4,1),
+    rotate 240ms cubic-bezier(.3,1.5,.4,1),
+    scale 200ms cubic-bezier(.3,1.6,.4,1);
 }
 
 /* 不可出的牌：hover 只上抬 8px，不放大、不发光，但 z 依然置顶 */
@@ -1795,6 +1806,24 @@ details.rules .body code {
   z-index: 90;
 }
 
+/* 攻击冲击环：从受害者中心炸开、扩大、消散（transform/opacity，全程走合成器） */
+.impact-ring {
+  position: fixed;
+  width: 26px;
+  height: 26px;
+  margin: -13px 0 0 -13px;
+  border-radius: 50%;
+  border: 3px solid var(--red-2);
+  box-shadow: 0 0 18px rgba(229, 72, 77, .7);
+  pointer-events: none;
+  z-index: 89;
+  animation: impactRing .52s cubic-bezier(.2, .8, .3, 1) forwards;
+}
+@keyframes impactRing {
+  0%   { opacity: .95; transform: scale(.4); }
+  100% { opacity: 0;   transform: scale(4.4); }
+}
+
 /* 爆炸全屏闪白 */
 .screen-flash {
   position: fixed;
@@ -2385,6 +2414,7 @@ details.rules .body code {
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation-duration: .01ms !important;
+    animation-delay: 0s !important;      /* 发牌错峰的延迟也一并清零 */
     animation-iteration-count: 1 !important;
     transition-duration: .01ms !important;
   }

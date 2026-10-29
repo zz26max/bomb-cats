@@ -335,21 +335,36 @@
           break;
         case 'attack': {
           SFX.attack();
-          const victimName = (e.victim != null && App.G.players[e.victim]) ? App.G.players[e.victim].name : null;
+          const cs = curState();
+          const victimName = (e.victim != null && cs && cs.players[e.victim]) ? cs.players[e.victim].name : null;
           View.floater('攻击', 'var(--red-2)', { sub: victimName ? '「' + victimName + '」要连抽 2 张' : undefined });
           if (e.victim != null) {
             View.pulsePlayer(e.victim, 'hit');
+            View.impactAtPlayer(e.victim);      // 冲击环：攻击要有视觉落点，不能只有飘字
             if (e.victim === App.humanId) buzz([40, 60, 40]);
           }
           await delay(420);
           break;
         }
-        case 'transfer':
+        case 'transfer': {
           SFX.transfer();
           View.pulsePlayer(e.from, 'hit');
           View.floater('转移', 'var(--gold-2)', { sub: '一张牌换了主人' });
-          await delay(360);
+          // 求饶/帮忙：牌从被点名的人手里真的飞向得牌者——不能只有飘字瞬间结算
+          if (e.card && View.canFly()) {
+            const toRect = e.to === App.humanId
+              ? rectOf(document.querySelector('.hand'))
+              : opponentRect(e.to);
+            View.flyCard(opponentRect(e.from), toRect, {
+              face: 'front', card: e.card,
+              scaleFrom: .42, scaleTo: .52, rotateFrom: -6, rotateTo: 16,
+              ms: 560, arcAt: .5, lift: -34, fadeTail: 80,
+              easing: 'cubic-bezier(.3,.7,.2,1)'
+            });
+          }
+          await delay(460);
           break;
+        }
         case 'nope':
         case 'cancel':
           SFX.nope();
@@ -1062,7 +1077,11 @@
   function showResultPanel(win, winnerName, turns) {
     if (win) {
       SFX.win(); buzz([40, 60, 40, 60, 100]);
-      View.burst(window.innerWidth / 2, window.innerHeight / 2, 70, ['#f3d79a', '#d9b061', '#fff0d0', '#ffd39b']);
+      // 三连金屑：中央先炸，两翼随后补上（单发粒子偏单薄）
+      const GOLD = ['#f3d79a', '#d9b061', '#fff0d0', '#ffd39b'];
+      View.burst(window.innerWidth / 2, window.innerHeight / 2 - 60, 60, GOLD);
+      setTimeout(() => View.burst(window.innerWidth * 0.24, window.innerHeight * 0.32, 34, GOLD), 200);
+      setTimeout(() => View.burst(window.innerWidth * 0.76, window.innerHeight * 0.32, 34, GOLD), 380);
     } else { SFX.lose(); buzz(120); }
 
     // 胜利用庆祝插画，失败用出局插画（单文件版会走内联数据）

@@ -102,6 +102,9 @@
 
   /* ---------------- 对手区 ---------------- */
 
+  /** 上一轮各座位的存活状态：活→死时给新节点挂一次性的「倒下」动画 */
+  const oppWasAlive = new Map();
+
   /** 5 只猫头像轮换使用；出局的换成 -dead 差分 */
   function catArt(pid, alive) {
     const n = String((pid % 5) + 1).padStart(2, '0');
@@ -120,6 +123,9 @@
       d.dataset.pid = p.id;
       if (state.phase === 'playing' && p.id === state.current) d.classList.add('active');
       if (!p.alive) d.classList.add('dead');
+      // 出局是「发生过的时刻」，不该是静止的属性：活→死的那一次渲染播倒下动画
+      if (oppWasAlive.get(p.id) === true && !p.alive) d.classList.add('dying');
+      oppWasAlive.set(p.id, p.alive);
       if (targetableIds && targetableIds.indexOf(p.id) >= 0) d.classList.add('targetable');
 
       // 猫头像 + 金色描边圈
@@ -435,21 +441,25 @@
     }
   }
 
-  /** 新牌进场：动画播完（或超时兜底）后摘掉 .entering，避免复用时残留 */
-  function markEntering(d) {
+  /** 新牌进场：动画播完（或超时兜底）后摘掉 .entering，避免复用时残留。
+   *  delayMs 用于开局发牌的依次滑入（第 i 张晚 i×70ms），播完要清掉行内延迟，
+   *  否则同一元素以后播 .leaving 离场动画时会被旧延迟拖住。 */
+  function markEntering(d, delayMs) {
     d.classList.add('entering');
+    if (delayMs) d.style.animationDelay = delayMs + 'ms';
     let timer = 0;
     const done = () => {
       clearTimeout(timer);
       d.removeEventListener('animationend', onEnd);
       d.classList.remove('entering');
+      d.style.animationDelay = '';
     };
     // 正常态是 cardIn；减少动态效果时 CSS 换成 cardFadeIn，两个名字都要认
     const onEnd = ev => {
       if (!ev || ev.animationName === 'cardIn' || ev.animationName === 'cardFadeIn') done();
     };
     d.addEventListener('animationend', onEnd);
-    timer = setTimeout(done, CARD_IN_MS);
+    timer = setTimeout(done, CARD_IN_MS + (delayMs || 0) + 80);
   }
 
   /** 收尾一次离场：摘掉监听、定时器与元素 */
@@ -469,6 +479,7 @@
     handEls.delete(uid);
     handIncoming.delete(uid);
     d.classList.remove('playable', 'locked', 'selected', 'newly-drawn', 'entering', 'is-hover', 'incoming');
+    d.style.animationDelay = '';
     d.classList.add('leaving');
 
     const rec = { el: d, timer: 0, onEnd: null };
@@ -599,7 +610,7 @@
     const seen = new Set();
     const ordered = [];
 
-    me.hand.forEach(card => {
+    me.hand.forEach((card, i) => {
       const uid = card.uid;
       seen.add(uid);
       finishLeave(uid);               // 极端情况下同一 uid 正在离场，先收掉旧元素
@@ -609,9 +620,9 @@
         d = createCard(card);
         handEls.set(uid, d);
         wrap.appendChild(d);
-        // 飞牌进来的牌先隐形占位（跳过 cardIn），其余新牌正常播进场动画
+        // 飞牌进来的牌先隐形占位（跳过 cardIn）；其余新牌按扇形位次依次滑入（发牌感）
         if (handIncoming.has(uid)) d.classList.add('incoming');
-        else markEntering(d);
+        else markEntering(d, i * 70);
       } else {
         syncCard(d, card);            // 老牌：复用元素，只同步内容
         d.classList.toggle('incoming', handIncoming.has(uid));
@@ -1065,6 +1076,20 @@
     burst(r.left + r.width / 2, r.top + r.height / 2, 46);
   }
 
+  /** 攻击命中的冲击环：在受害者位置炸开一圈红环再消散（攻击的视觉落点） */
+  function impactAtPlayer(pid) {
+    const node = document.querySelector('.opponent[data-pid="' + pid + '"]');
+    const target = node || document.querySelector('#myPlate');
+    if (!target || !el.fx) return;
+    const r = target.getBoundingClientRect();
+    const ring = document.createElement('div');
+    ring.className = 'impact-ring';
+    ring.style.left = (r.left + r.width / 2) + 'px';
+    ring.style.top = (r.top + r.height / 2) + 'px';
+    el.fx.appendChild(ring);
+    setTimeout(() => { if (ring.parentNode) ring.parentNode.removeChild(ring); }, 600);
+  }
+
   /** 给玩家卡片加一个短暂的动画 class */
   function pulsePlayer(pid, cls) {
     const node = document.querySelector('.opponent[data-pid="' + pid + '"]');
@@ -1107,7 +1132,17 @@
 
   function showPeek(cards, onClose) {
     el.peekCards.innerHTML = '';
-    cards.forEach(c => el.peekCards.appendChild(createPeekCard(c)));
+    // 三张牌依次翻入（80ms 错峰），比整排同时出现更有「一张一张翻给你看」的过程感
+    cards.forEach((c, i) => {
+      const node = createPeekCard(c);
+      el.peekCards.appendChild(node);
+      if (canFly()) {
+        node.animate([
+          { opacity: 0, transform: 'translateY(16px) rotateY(-70deg) scale(.88)' },
+          { opacity: 1, transform: 'translateY(0) rotateY(0deg) scale(1)' }
+        ], { duration: 300, delay: 120 + i * 90, easing: 'cubic-bezier(.2,.8,.3,1)', fill: 'backwards' });
+      }
+    });
     el.peekPanel.classList.add('show');
     const close = () => {
       el.peekPanel.classList.remove('show');
@@ -1132,7 +1167,7 @@
     View: {
       el, createCard, createPeekCard,
       renderOpponents, renderStage, renderHand, setPrompt, renderLog,
-      floater, shake, flash, burst, burstAtPlayer, pulsePlayer, showPeek,
+      floater, shake, flash, burst, burstAtPlayer, impactAtPlayer, pulsePlayer, showPeek,
       showDrawnCard, showOpponentDraw, bumpDeck, shufflePile, boomAt, boomAtPlayer, catArt, ASSET,
       setPileDrawable, pulseTurnCue, resetHand,
       showPlaceMarker, hidePlaceMarker, placeMarkerText,

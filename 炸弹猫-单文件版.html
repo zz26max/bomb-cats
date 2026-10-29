@@ -314,6 +314,13 @@ body {
 /* 出局贴纸：素材 SVG 直接盖在头像上，不再用伪元素写字 */
 .opponent.dead::after { content: none; }
 
+/* 出局的瞬间：向后倒下 + 褪色（活→死的那一次渲染由 view.js 挂 .dying） */
+.opponent.dying { animation: oppFall .62s cubic-bezier(.35,.6,.3,1) both; }
+@keyframes oppFall {
+  0%   { transform: translateY(0) rotate(0)    scale(1);   opacity: 1;   filter: none; }
+  100% { transform: translateY(7px) rotate(-7deg) scale(.94); opacity: .45; filter: grayscale(.7); }
+}
+
 .opp-avatar {
   position: relative;
   width: 52px;
@@ -774,21 +781,23 @@ body {
   transform: translate(-50%, -50%) scale(1);
 }
 
-/* 抽到的牌放大一点，确保看得清 */
+/* 抽到的牌放大一点，确保看得清。
+   揭晓用 3D 翻面：侧立 → 翻正 → 微回弹，配合卡背飞入读起来才是「翻开一张新牌」，
+   而不是凭空弹出一帧。 */
 .draw-flash .card.draw-face {
   width: 116px;
   height: 162px;
   cursor: default;
-  animation: drawPop .42s cubic-bezier(.2,.9,.3,1);
+  animation: drawFlip .5s cubic-bezier(.2,.7,.3,1);
 }
 .draw-flash .card.draw-face .glyph { font-size: 34px; margin: 8px 0 5px; }
 .draw-flash .card.draw-face .cname { font-size: 13.5px; margin-bottom: 4px; }
 .draw-flash .card.draw-face .ctext { font-size: 9px; }
 
-@keyframes drawPop {
-  0%   { transform: scale(.72) rotate(-5deg); }
-  60%  { transform: scale(1.06) rotate(0deg); }
-  100% { transform: scale(1) rotate(0deg); }
+@keyframes drawFlip {
+  0%   { transform: perspective(760px) rotateY(-97deg) scale(.86); }
+  55%  { transform: perspective(760px) rotateY(9deg)   scale(1.05); }
+  100% { transform: perspective(760px) rotateY(0)      scale(1); }
 }
 
 /* 对手抽牌：卡片轻微晃动，暗示「他拿走了一张」 */
@@ -952,7 +961,8 @@ body {
   border: 1px solid var(--line);
   background: var(--panel);
   font-size: 12px;
-  transition: border-color .25s ease, box-shadow .25s ease, background .25s ease;
+  transition: border-color .25s ease, box-shadow .25s ease, background .25s ease,
+              opacity .45s ease, filter .45s ease, transform .45s ease;
 }
 
 /* 自己的猫头像 */
@@ -1118,7 +1128,8 @@ body {
     scale 140ms cubic-bezier(.3,1.4,.5,1);
 }
 
-/* hover：由 main.js 的指针命中判定切 .is-hover（重叠时 CSS :hover 命中不准） */
+/* hover：由 main.js 的指针命中判定切 .is-hover（重叠时 CSS :hover 命中不准）。
+   缓动带 overshoot（y1=1.5）：抬起时先冲过头再弹回，手感是「弹簧」而不是「匀速滑」。 */
 .hand > .card.is-hover {
   translate: var(--x, 0px) calc(var(--lift, 0px) - 22px);
   rotate: calc(var(--rot, 0) * 0.6deg);
@@ -1130,17 +1141,17 @@ body {
     0 0 0 2px rgba(245,196,95,.85),
     0 0 24px rgba(245,196,95,.35);
   transition:
-    translate 160ms cubic-bezier(.4,0,.2,1),
-    rotate 160ms cubic-bezier(.4,0,.2,1),
-    scale 160ms cubic-bezier(.4,0,.2,1);
+    translate 240ms cubic-bezier(.3,1.5,.4,1),
+    rotate 240ms cubic-bezier(.3,1.5,.4,1),
+    scale 240ms cubic-bezier(.3,1.5,.4,1);
 }
 
-/* 可出的牌 hover 时：缩放回弹仍然是 140ms，按下抬起才不会发闷 */
+/* 可出的牌 hover 时：scale 的回弹略快于位移，按下抬起才不会发闷 */
 .hand > .card.playable.is-hover {
   transition:
-    translate 160ms cubic-bezier(.4,0,.2,1),
-    rotate 160ms cubic-bezier(.4,0,.2,1),
-    scale 140ms cubic-bezier(.3,1.4,.5,1);
+    translate 240ms cubic-bezier(.3,1.5,.4,1),
+    rotate 240ms cubic-bezier(.3,1.5,.4,1),
+    scale 200ms cubic-bezier(.3,1.6,.4,1);
 }
 
 /* 不可出的牌：hover 只上抬 8px，不放大、不发光，但 z 依然置顶 */
@@ -1805,6 +1816,24 @@ details.rules .body code {
   z-index: 90;
 }
 
+/* 攻击冲击环：从受害者中心炸开、扩大、消散（transform/opacity，全程走合成器） */
+.impact-ring {
+  position: fixed;
+  width: 26px;
+  height: 26px;
+  margin: -13px 0 0 -13px;
+  border-radius: 50%;
+  border: 3px solid var(--red-2);
+  box-shadow: 0 0 18px rgba(229, 72, 77, .7);
+  pointer-events: none;
+  z-index: 89;
+  animation: impactRing .52s cubic-bezier(.2, .8, .3, 1) forwards;
+}
+@keyframes impactRing {
+  0%   { opacity: .95; transform: scale(.4); }
+  100% { opacity: 0;   transform: scale(4.4); }
+}
+
 /* 爆炸全屏闪白 */
 .screen-flash {
   position: fixed;
@@ -2395,6 +2424,7 @@ details.rules .body code {
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation-duration: .01ms !important;
+    animation-delay: 0s !important;      /* 发牌错峰的延迟也一并清零 */
     animation-iteration-count: 1 !important;
     transition-duration: .01ms !important;
   }
@@ -3984,6 +4014,9 @@ window.__ASSETS = {"assets/art/banner.webp":"data:image/webp;base64,UklGRrSAAgBX
 
   /* ---------------- 对手区 ---------------- */
 
+  /** 上一轮各座位的存活状态：活→死时给新节点挂一次性的「倒下」动画 */
+  const oppWasAlive = new Map();
+
   /** 5 只猫头像轮换使用；出局的换成 -dead 差分 */
   function catArt(pid, alive) {
     const n = String((pid % 5) + 1).padStart(2, '0');
@@ -4002,6 +4035,9 @@ window.__ASSETS = {"assets/art/banner.webp":"data:image/webp;base64,UklGRrSAAgBX
       d.dataset.pid = p.id;
       if (state.phase === 'playing' && p.id === state.current) d.classList.add('active');
       if (!p.alive) d.classList.add('dead');
+      // 出局是「发生过的时刻」，不该是静止的属性：活→死的那一次渲染播倒下动画
+      if (oppWasAlive.get(p.id) === true && !p.alive) d.classList.add('dying');
+      oppWasAlive.set(p.id, p.alive);
       if (targetableIds && targetableIds.indexOf(p.id) >= 0) d.classList.add('targetable');
 
       // 猫头像 + 金色描边圈
@@ -4317,21 +4353,25 @@ window.__ASSETS = {"assets/art/banner.webp":"data:image/webp;base64,UklGRrSAAgBX
     }
   }
 
-  /** 新牌进场：动画播完（或超时兜底）后摘掉 .entering，避免复用时残留 */
-  function markEntering(d) {
+  /** 新牌进场：动画播完（或超时兜底）后摘掉 .entering，避免复用时残留。
+   *  delayMs 用于开局发牌的依次滑入（第 i 张晚 i×70ms），播完要清掉行内延迟，
+   *  否则同一元素以后播 .leaving 离场动画时会被旧延迟拖住。 */
+  function markEntering(d, delayMs) {
     d.classList.add('entering');
+    if (delayMs) d.style.animationDelay = delayMs + 'ms';
     let timer = 0;
     const done = () => {
       clearTimeout(timer);
       d.removeEventListener('animationend', onEnd);
       d.classList.remove('entering');
+      d.style.animationDelay = '';
     };
     // 正常态是 cardIn；减少动态效果时 CSS 换成 cardFadeIn，两个名字都要认
     const onEnd = ev => {
       if (!ev || ev.animationName === 'cardIn' || ev.animationName === 'cardFadeIn') done();
     };
     d.addEventListener('animationend', onEnd);
-    timer = setTimeout(done, CARD_IN_MS);
+    timer = setTimeout(done, CARD_IN_MS + (delayMs || 0) + 80);
   }
 
   /** 收尾一次离场：摘掉监听、定时器与元素 */
@@ -4351,6 +4391,7 @@ window.__ASSETS = {"assets/art/banner.webp":"data:image/webp;base64,UklGRrSAAgBX
     handEls.delete(uid);
     handIncoming.delete(uid);
     d.classList.remove('playable', 'locked', 'selected', 'newly-drawn', 'entering', 'is-hover', 'incoming');
+    d.style.animationDelay = '';
     d.classList.add('leaving');
 
     const rec = { el: d, timer: 0, onEnd: null };
@@ -4481,7 +4522,7 @@ window.__ASSETS = {"assets/art/banner.webp":"data:image/webp;base64,UklGRrSAAgBX
     const seen = new Set();
     const ordered = [];
 
-    me.hand.forEach(card => {
+    me.hand.forEach((card, i) => {
       const uid = card.uid;
       seen.add(uid);
       finishLeave(uid);               // 极端情况下同一 uid 正在离场，先收掉旧元素
@@ -4491,9 +4532,9 @@ window.__ASSETS = {"assets/art/banner.webp":"data:image/webp;base64,UklGRrSAAgBX
         d = createCard(card);
         handEls.set(uid, d);
         wrap.appendChild(d);
-        // 飞牌进来的牌先隐形占位（跳过 cardIn），其余新牌正常播进场动画
+        // 飞牌进来的牌先隐形占位（跳过 cardIn）；其余新牌按扇形位次依次滑入（发牌感）
         if (handIncoming.has(uid)) d.classList.add('incoming');
-        else markEntering(d);
+        else markEntering(d, i * 70);
       } else {
         syncCard(d, card);            // 老牌：复用元素，只同步内容
         d.classList.toggle('incoming', handIncoming.has(uid));
@@ -4947,6 +4988,20 @@ window.__ASSETS = {"assets/art/banner.webp":"data:image/webp;base64,UklGRrSAAgBX
     burst(r.left + r.width / 2, r.top + r.height / 2, 46);
   }
 
+  /** 攻击命中的冲击环：在受害者位置炸开一圈红环再消散（攻击的视觉落点） */
+  function impactAtPlayer(pid) {
+    const node = document.querySelector('.opponent[data-pid="' + pid + '"]');
+    const target = node || document.querySelector('#myPlate');
+    if (!target || !el.fx) return;
+    const r = target.getBoundingClientRect();
+    const ring = document.createElement('div');
+    ring.className = 'impact-ring';
+    ring.style.left = (r.left + r.width / 2) + 'px';
+    ring.style.top = (r.top + r.height / 2) + 'px';
+    el.fx.appendChild(ring);
+    setTimeout(() => { if (ring.parentNode) ring.parentNode.removeChild(ring); }, 600);
+  }
+
   /** 给玩家卡片加一个短暂的动画 class */
   function pulsePlayer(pid, cls) {
     const node = document.querySelector('.opponent[data-pid="' + pid + '"]');
@@ -4989,7 +5044,17 @@ window.__ASSETS = {"assets/art/banner.webp":"data:image/webp;base64,UklGRrSAAgBX
 
   function showPeek(cards, onClose) {
     el.peekCards.innerHTML = '';
-    cards.forEach(c => el.peekCards.appendChild(createPeekCard(c)));
+    // 三张牌依次翻入（80ms 错峰），比整排同时出现更有「一张一张翻给你看」的过程感
+    cards.forEach((c, i) => {
+      const node = createPeekCard(c);
+      el.peekCards.appendChild(node);
+      if (canFly()) {
+        node.animate([
+          { opacity: 0, transform: 'translateY(16px) rotateY(-70deg) scale(.88)' },
+          { opacity: 1, transform: 'translateY(0) rotateY(0deg) scale(1)' }
+        ], { duration: 300, delay: 120 + i * 90, easing: 'cubic-bezier(.2,.8,.3,1)', fill: 'backwards' });
+      }
+    });
     el.peekPanel.classList.add('show');
     const close = () => {
       el.peekPanel.classList.remove('show');
@@ -5014,7 +5079,7 @@ window.__ASSETS = {"assets/art/banner.webp":"data:image/webp;base64,UklGRrSAAgBX
     View: {
       el, createCard, createPeekCard,
       renderOpponents, renderStage, renderHand, setPrompt, renderLog,
-      floater, shake, flash, burst, burstAtPlayer, pulsePlayer, showPeek,
+      floater, shake, flash, burst, burstAtPlayer, impactAtPlayer, pulsePlayer, showPeek,
       showDrawnCard, showOpponentDraw, bumpDeck, shufflePile, boomAt, boomAtPlayer, catArt, ASSET,
       setPileDrawable, pulseTurnCue, resetHand,
       showPlaceMarker, hidePlaceMarker, placeMarkerText,
@@ -5448,21 +5513,36 @@ window.__ASSETS = {"assets/art/banner.webp":"data:image/webp;base64,UklGRrSAAgBX
           break;
         case 'attack': {
           SFX.attack();
-          const victimName = (e.victim != null && App.G.players[e.victim]) ? App.G.players[e.victim].name : null;
+          const cs = curState();
+          const victimName = (e.victim != null && cs && cs.players[e.victim]) ? cs.players[e.victim].name : null;
           View.floater('攻击', 'var(--red-2)', { sub: victimName ? '「' + victimName + '」要连抽 2 张' : undefined });
           if (e.victim != null) {
             View.pulsePlayer(e.victim, 'hit');
+            View.impactAtPlayer(e.victim);      // 冲击环：攻击要有视觉落点，不能只有飘字
             if (e.victim === App.humanId) buzz([40, 60, 40]);
           }
           await delay(420);
           break;
         }
-        case 'transfer':
+        case 'transfer': {
           SFX.transfer();
           View.pulsePlayer(e.from, 'hit');
           View.floater('转移', 'var(--gold-2)', { sub: '一张牌换了主人' });
-          await delay(360);
+          // 求饶/帮忙：牌从被点名的人手里真的飞向得牌者——不能只有飘字瞬间结算
+          if (e.card && View.canFly()) {
+            const toRect = e.to === App.humanId
+              ? rectOf(document.querySelector('.hand'))
+              : opponentRect(e.to);
+            View.flyCard(opponentRect(e.from), toRect, {
+              face: 'front', card: e.card,
+              scaleFrom: .42, scaleTo: .52, rotateFrom: -6, rotateTo: 16,
+              ms: 560, arcAt: .5, lift: -34, fadeTail: 80,
+              easing: 'cubic-bezier(.3,.7,.2,1)'
+            });
+          }
+          await delay(460);
           break;
+        }
         case 'nope':
         case 'cancel':
           SFX.nope();
@@ -6175,7 +6255,11 @@ window.__ASSETS = {"assets/art/banner.webp":"data:image/webp;base64,UklGRrSAAgBX
   function showResultPanel(win, winnerName, turns) {
     if (win) {
       SFX.win(); buzz([40, 60, 40, 60, 100]);
-      View.burst(window.innerWidth / 2, window.innerHeight / 2, 70, ['#f3d79a', '#d9b061', '#fff0d0', '#ffd39b']);
+      // 三连金屑：中央先炸，两翼随后补上（单发粒子偏单薄）
+      const GOLD = ['#f3d79a', '#d9b061', '#fff0d0', '#ffd39b'];
+      View.burst(window.innerWidth / 2, window.innerHeight / 2 - 60, 60, GOLD);
+      setTimeout(() => View.burst(window.innerWidth * 0.24, window.innerHeight * 0.32, 34, GOLD), 200);
+      setTimeout(() => View.burst(window.innerWidth * 0.76, window.innerHeight * 0.32, 34, GOLD), 380);
     } else { SFX.lose(); buzz(120); }
 
     // 胜利用庆祝插画，失败用出局插画（单文件版会走内联数据）
