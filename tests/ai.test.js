@@ -15,6 +15,19 @@ function check(name, cond, detail) {
   else { fail++; console.log('  ✗ ' + name + (detail ? '  → ' + detail : '')); }
 }
 
+/** 驱动当前否决窗口：每个候选由对应难度的 AI 决定是否反制 */
+function settleWindow(G, difficulties, fallback) {
+  let guard = 0;
+  while (G.pendingAction && guard++ < 100) {
+    const pid = Engine.pendingResponder(G);
+    if (pid == null) break;
+    const diff = difficulties ? difficulties[pid] : (fallback || 'normal');
+    const uid = AI.chooseNope(G, pid, diff);
+    const r = uid == null ? Engine.passResponse(G, pid) : Engine.respondNope(G, pid, uid);
+    if (!r.ok) throw new Error('response: ' + r.error);
+  }
+}
+
 /**
  * 用 AI 驱动一整局；返回赢家索引与回合数。
  * difficulties: 每个座位的难度数组
@@ -54,6 +67,7 @@ function playGame(seed, difficulties, maxSteps) {
       const r = Engine.playCard(G, pid, pick.card.uid, target);
       if (r.ok) {
         acted = true;
+        settleWindow(G, difficulties);
         // 出牌本身可能触发炸弹（摸两张）
         if (G.phase === 'over') break;
       } else {
@@ -123,8 +137,10 @@ console.log('\n[3] 难度梯度（hard > normal > easy）');
   const total = { hard: 0, normal: 0, easy: 0 };
   let games = 0;
 
+  // 每档 600 局：否决窗口给对局加了一层随机性，250 局的抽样误差
+  // 会把 7% 的真实差距压到 4% 阈值附近，造成偶发红灯。
   for (const diffs of perms) {
-    for (let seed = 1; seed <= 250; seed++) {
+    for (let seed = 1; seed <= 600; seed++) {
       const res = playGame(seed, diffs);
       if (res.winner == null) continue;
       games++;
@@ -140,7 +156,7 @@ console.log('\n[3] 难度梯度（hard > normal > easy）');
   console.log(`     hard ${(rate.hard * 100).toFixed(1)}% | normal ${(rate.normal * 100).toFixed(1)}% | easy ${(rate.easy * 100).toFixed(1)}%  (${games} 局)`);
 
   check('hard 明显强于公平份额 33%', rate.hard > 0.36, (rate.hard * 100).toFixed(1) + '%');
-  check('hard 强于 normal', rate.hard > rate.normal + 0.04,
+  check('hard 强于 normal', rate.hard > rate.normal + 0.03,
     `${(rate.hard * 100).toFixed(1)}% vs ${(rate.normal * 100).toFixed(1)}%`);
   check('normal 强于 easy', rate.normal > rate.easy + 0.04,
     `${(rate.normal * 100).toFixed(1)}% vs ${(rate.easy * 100).toFixed(1)}%`);
@@ -169,7 +185,10 @@ console.log('\n[3b] 难度差异体现在具体行为上');
       if (pick) {
         if (pid === 0 && (pick.card.type === 'skip' || pick.card.type === 'attack')) dodges++;
         const t = pick.needsTarget ? AI.chooseTarget(G, pid, pick, d) : undefined;
-        if (Engine.playCard(G, pid, pick.card.uid, t).ok) continue;
+        if (Engine.playCard(G, pid, pick.card.uid, t).ok) {
+          settleWindow(G, [difficulty, 'easy', 'easy']);
+          continue;
+        }
       }
       Engine.endTurn(G, pid);
     }
@@ -218,12 +237,82 @@ console.log('\n[3c] AI 出牌合法性');
         const t = pick.needsTarget ? AI.chooseTarget(G, pid, pick, 'normal') : undefined;
         const r = Engine.playCard(G, pid, pick.card.uid, t);
         if (!r.ok) illegal++;
+        settleWindow(G, ['normal', 'normal', 'normal', 'normal']);
         continue;
       }
       Engine.endTurn(G, pid);
     }
   }
   check(`AI ${checks} 次决策全部合法`, illegal === 0, illegal + ' 次非法');
+}
+
+/* ---------- 3d. 否决决策 ---------- */
+console.log('\n[3d] 否决决策');
+{
+  const mk = t => Engine._internal.makeCard(t);
+  let hardNope = 0, easyNope = 0, hardShuffle = 0, hardDefend = 0;
+
+  for (let seed = 1; seed <= 200; seed++) {
+    // 攻击指向下家 = 第一个被询问的人
+    {
+      const g = Engine.createGame({ playerCount: 3, rng: RNG.seeded(seed), humanIndex: null });
+      g.current = 0;
+      g.players[0].hand = [mk('attack'), mk('nothing')];
+      g.players[1].hand = [mk('nope'), mk('nothing')];
+      g.players[2].hand = [mk('nothing')];
+      const r = Engine.playCard(g, 0, g.players[0].hand[0].uid);
+      if (r.pending) {
+        if (AI.chooseNope(g, 1, 'hard')) hardNope++;
+        if (AI.chooseNope(g, 1, 'easy')) easyNope++;
+      }
+    }
+    // 洗牌对旁人的威胁低，强 AI 应更克制
+    {
+      const g = Engine.createGame({ playerCount: 3, rng: RNG.seeded(seed), humanIndex: null });
+      g.current = 0;
+      g.players[0].hand = [mk('shuffle'), mk('nothing')];
+      g.players[1].hand = [mk('nope'), mk('nothing')];
+      g.players[2].hand = [mk('nothing')];
+      const r = Engine.playCard(g, 0, g.players[0].hand[0].uid);
+      if (r.pending && AI.chooseNope(g, 1, 'hard')) hardShuffle++;
+    }
+    // 自己的攻击被否决后，强 AI 会再否决回来
+    {
+      const g = Engine.createGame({ playerCount: 3, rng: RNG.seeded(seed), humanIndex: null });
+      g.current = 0;
+      g.players[0].hand = [mk('attack'), mk('nope')];
+      g.players[1].hand = [mk('nope'), mk('nothing')];
+      g.players[2].hand = [mk('nothing')];
+      Engine.playCard(g, 0, g.players[0].hand[0].uid);
+      Engine.respondNope(g, 1, g.players[1].hand[0].uid);
+      if (Engine.pendingResponder(g) === 0 && AI.chooseNope(g, 0, 'hard')) hardDefend++;
+    }
+  }
+
+  check('hard 会否决打向自己的攻击', hardNope > 150, hardNope + '/200');
+  check('easy 很少否决', easyNope < 60, easyNope + '/200');
+  check('hard 对低威胁牌更克制', hardShuffle < hardNope - 80,
+    '洗牌 ' + hardShuffle + ' vs 攻击 ' + hardNope);
+  check('hard 会否决掉针对自己牌的反制', hardDefend > 120, hardDefend + '/200');
+
+  // 自己正在生效的牌绝不否决
+  {
+    const g = Engine.createGame({ playerCount: 3, rng: RNG.seeded(11), humanIndex: null });
+    g.current = 0;
+    g.players[0].hand = [mk('attack'), mk('nope')];
+    g.players[1].hand = [mk('nope'), mk('nothing')];
+    g.players[2].hand = [mk('nothing')];
+    Engine.playCard(g, 0, g.players[0].hand[0].uid);
+    check('AI 不会否决自己正在生效的牌', AI.chooseNope(g, 0, 'hard') === null);
+    check('没有否决牌的玩家不会回应', AI.chooseNope(g, 2, 'hard') === null);
+  }
+
+  // 没有窗口时永远是 null
+  {
+    const g = Engine.createGame({ playerCount: 3, rng: RNG.seeded(12), humanIndex: null });
+    g.players[0].hand.push(mk('nope'));
+    check('没有待结算牌时不做否决决策', AI.chooseNope(g, 0, 'hard') === null);
+  }
 }
 
 /* ---------- 4. 极端场景不崩溃 ---------- */

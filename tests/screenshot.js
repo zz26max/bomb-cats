@@ -62,6 +62,8 @@ const urlOf = f => 'file:///' + f.replace(/\\/g, '/').replace(/ /g, '%20');
 function shoot(outName, targetFile, height, budget) {
   const out = path.join(outDir, outName);
   const profile = path.join(process.env.TEMP, 'cshot_' + Math.random().toString(36).slice(2, 10));
+  // 先删旧图：Chrome 偶尔返回非零码但没写出新图，只看 exists 会把陈旧截图当成成功
+  try { fs.rmSync(out, { force: true }); } catch (e) {}
   try {
     execFileSync(CHROME, [
       '--headless=new', '--disable-gpu', '--no-sandbox',
@@ -211,7 +213,7 @@ let mobileFail = 0;
  * 手机截图：CDP 覆盖视口 → 导航 → 等 App.G + 驱动完成标记 → 截图 → 自校验。
  * 自校验同时看两处：Runtime.evaluate 的 innerWidth/innerHeight/dpr，以及 PNG 头的像素宽高。
  */
-async function shootMobile(page, outName, targetFile, width, height) {
+async function shootMobile(page, outName, targetFile, width, height, readyExpr) {
   const out = path.join(outDir, outName);
   await page.send('Page.enable');
   await page.send('Emulation.setDeviceMetricsOverride', {
@@ -221,11 +223,16 @@ async function shootMobile(page, outName, targetFile, width, height) {
   await page.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
   await page.send('Page.navigate', { url: urlOf(targetFile) });
 
-  // 页面就绪：App.G 已创建（驱动脚本已点过开始）
-  await waitForValue(page, '!!(window.BombCats && window.BombCats.App && window.BombCats.App.G)', 8000);
+  // 页面就绪：App.G 已创建（驱动脚本已点过开始）；开局截图没有 App.G，传 readyExpr 覆盖
+  await waitForValue(page, readyExpr || '!!(window.BombCats && window.BombCats.App && window.BombCats.App.G)', 8000);
   // 驱动脚本收尾（battle 的 10 次结束回合跑完）
   await waitForValue(page, 'document.title === "MOBILE_READY"', 10000);
   await sleep(350);   // 让最后一张牌/提示条稳定
+  // 飞牌克隆是 300-400ms 的一次性元素，可能在 READY 之后才起播；
+  // 截前统一清理，避免把半空的卡背/卡面当成布局问题。
+  await page.send('Runtime.evaluate', {
+    expression: 'document.querySelectorAll(".fly-card").forEach(function (n) { n.remove(); })'
+  });
 
   const { data } = await page.send('Page.captureScreenshot', { format: 'png' });
   fs.writeFileSync(out, Buffer.from(data, 'base64'));
@@ -278,11 +285,37 @@ window.addEventListener('load', function () {
       if (end && !end.disabled) { try { end.click(); } catch (e) {} }
       if (n > 9) {
         clearInterval(iv);
-        // 等动画/飞牌全部结束再静置 600ms，避免截到抽牌揭晓或飞牌的中间态
+        // 先冻结 AI 再等空闲：只让已经开始的那一手播完，不再起新动作。
+        // 反过来做（空了才冻结）会撞上 driveAI 已经越过 isAI 检查的异步收尾，
+        // READY 之后还会冒出抽牌飞行动画，截到一张盖住牌堆的大卡背。
         (function waitIdle() {
           var App = window.BombCats && window.BombCats.App;
-          if (App && App.busy) { setTimeout(waitIdle, 100); return; }
-          setTimeout(function () { document.title = 'MOBILE_READY'; }, 600);
+          if (!waitIdle.frozen) {
+            waitIdle.frozen = true;
+            if (App && App.G && App.G.players) {
+              App.G.players.forEach(function (p) {
+                if (p.id !== App.humanId) p.isAI = false;
+              });
+            }
+          }
+          // 飞牌克隆不写 App.busy：等它飞完再定格
+          if ((App && App.busy) ||
+              document.querySelector('.fly-card') ||
+              document.querySelector('.draw-flash.show')) {
+            setTimeout(waitIdle, 100);
+            return;
+          }
+          setTimeout(function () {
+            // 静置期间若又起了一帧（上一手 AI 的收尾），继续等而不是直接截图
+            if ((App && App.busy) ||
+                document.querySelector('.fly-card') ||
+                document.querySelector('.draw-flash.show')) {
+              setTimeout(waitIdle, 100);
+              return;
+            }
+            document.querySelectorAll('.fly-card').forEach(function (n) { n.remove(); });
+            document.title = 'MOBILE_READY';
+          }, 600);
         })();
       }
     }, 320);
@@ -303,9 +336,13 @@ window.addEventListener('load', function () {
     App.input = 'touch';
     var appEl = document.querySelector('.app');
     if (appEl) appEl.classList.add('touch-input');
+    // 先等开局动画/飞牌结束，再改状态；半路改 busy 会把动画停在中间
+    for (var i = 0; i < 30 && (App.busy || document.querySelector('.fly-card')); i++) await wait(100);
     G.current = App.humanId;
-    G.players[G.current].isAI = false;   // 竞态防护：防止开局随到 AI 时定时器抢回合（详见 targetScript）
+    G.pendingBomb = null;   // 清掉开局 AI 抽炸弹留下的待放回状态，否则没有可出的牌
     App.busy = false;
+    // 冻结全部 AI：只摘当前座位的 isAI 挡不住别的定时器
+    G.players.forEach(function (p) { if (p.id !== App.humanId) p.isAI = false; });
     // 保证手里有一张无需目标、可直接出的牌
     var me = G.players[App.humanId];
     me.hand.push({ uid: 990001, type: 'skip', name: BC.CARDS.skip.name, glyph: BC.CARDS.skip.glyph, kind: 'action' });
@@ -357,45 +394,51 @@ window.addEventListener('load', function () {
 });
 `;
 
-/* ---- 驱动脚本 2：选中一张需要目标的牌（帮忙），进入瞄准态 ---- */
+/* ---- 驱动脚本 2：选中一张需要目标的牌（帮忙），进入瞄准态 ----
+   截图要的是稳定画面，所以直接把「已选中 + 等待目标」的状态摆好；
+   真实点击路径由 browser.test.js 覆盖。 */
 const aimingScript = `
 window.addEventListener('load', function () {
-  setTimeout(function () {
+  setTimeout(async function () {
+    function wait(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
     document.getElementById('btnStart').click();
-    setTimeout(function () {
-      var BC = window.BombCats;
-      var App = BC.App, G = App.G;
-      // 确保轮到真人，且手上有一张「帮忙」（唯一需要指定目标的牌之一）
-      G.current = App.humanId;
-      var me = G.players[App.humanId];
-      me.hand = me.hand.filter(function (c) { return c.type !== 'help'; });
-      me.hand.push({ uid: 999001, type: 'help',
-        name: BC.CARDS.help.name, glyph: BC.CARDS.help.glyph, kind: 'action' });
-      // 保证至少两个对手有 2 张以上手牌，才可能出现可选目标
-      G.players.forEach(function (p) {
-        if (p.id !== App.humanId && p.hand.length < 2) p.hand.push({ uid: 800000 + p.id, type: 'skip', name: '跳过', glyph: '⏭️', kind: 'action' });
-      });
-      App.busy = false;
-      window.BombCats.App.selectedUid = null;
-      // 触发重绘后点「帮忙」
-      if (App.render) App.render();
-      setTimeout(function () {
-        var hand = document.getElementById('hand');
-        var cards = hand.querySelectorAll('.card');
-        var blank = 0, target = null;
-        for (var i = 0; i < cards.length; i++) {
-          var t = cards[i].querySelector('.ctext');
-          if (!t || !t.textContent) blank++;
-          if (cards[i].dataset.type === 'help' && !target) target = cards[i];
-        }
-        document.title = 'CARDS=' + cards.length + ',BLANK=' + blank;
-        if (target) target.click();
-        setTimeout(function () {
-          var aim = document.querySelectorAll('.opponent.targetable').length;
-          document.title = 'CARDS=' + cards.length + ',BLANK=' + blank + ',TARGETABLE=' + aim;
-        }, 220);
-      }, 320);
-    }, 1400);
+    await wait(1400);
+    var BC = window.BombCats, App = BC.App, G = App.G;
+    if (!G) { document.title = 'NOG'; return; }
+    // 确保轮到真人，并冻结全部 AI，防止开局定时器把回合抢回去
+    G.current = App.humanId;
+    G.pendingBomb = null;          // 若开局 1.4s 内有人抽到炸弹，清掉待放回状态，否则所有出牌都会被规则正确禁掉
+    App.busy = false;
+    var me = G.players[App.humanId];
+    me.hand = me.hand.filter(function (c) { return c.type !== 'help'; });
+    me.hand.push({ uid: 999001, type: 'help',
+      name: BC.CARDS.help.name, glyph: BC.CARDS.help.glyph, kind: 'action' });
+    // 保证至少两个对手有 2 张以上手牌，才可能出现可选目标
+    G.players.forEach(function (p) {
+      if (p.id !== App.humanId) {
+        p.isAI = false;
+        if (p.hand.length < 2) p.hand.push({ uid: 800000 + p.id, type: 'skip', name: '跳过', glyph: '⏭️', kind: 'action' });
+      }
+    });
+    App.render();
+    await wait(200);
+    var lm = BC.Engine.legalMoves(G, App.humanId);
+    var move = lm.needTarget.find(function (m) { return m.cardUid === 999001; });
+    if (!move) { document.title = 'NO_TARGET_MOVE'; return; }
+    App.selectedUid = 999001;
+    App.selectedAt = Date.now();
+    App.awaitingTarget = true;
+    App.render();
+    var cards = document.querySelectorAll('#hand .card');
+    var blank = 0;
+    for (var i = 0; i < cards.length; i++) {
+      var t = cards[i].querySelector('.ctext');
+      if (!t || !t.textContent) blank++;
+    }
+    await wait(280);
+    document.querySelectorAll('.fly-card').forEach(function (n) { n.remove(); });
+    var aim = document.querySelectorAll('.opponent.targetable').length;
+    document.title = 'CARDS=' + cards.length + ',BLANK=' + blank + ',TARGETABLE=' + aim;
   }, 120);
 });
 `;
@@ -452,6 +495,8 @@ window.addEventListener('load', function () {
     // 手牌不用手动重绘：live 渲染已经带上了「新」高亮，
     // 手动渲染还得重算可出牌集合，容易画出全灰的假状态。
     if (drawn) window.BombCats.View.showDrawnCard(drawn, 60000);
+    // 定格揭晓后清掉仍在飞的卡背克隆，别让「翻牌」被一张半路卡背挡住
+    document.querySelectorAll('.fly-card').forEach(function (n) { n.remove(); });
     document.title = 'DRAW:' + (hadNew ? 'OK' : 'MISS');
   }, 150);
 });
@@ -469,11 +514,14 @@ window.addEventListener('load', function () {
     App.input = 'touch';
     var appEl = document.querySelector('.app');
     if (appEl) appEl.classList.add('touch-input');
+    // 等待开局动画结束后再接管状态，否则会把正在飞的牌停在半空
+    for (var i = 0; i < 30 && (App.busy || document.querySelector('.fly-card')); i++) await wait(100);
     G.current = App.humanId;
-    // 竞态防护：开局首随机到 AI 时，scheduleAIIfNeeded 的定时器会在截图前开跑，
-    // 把 G.current 抢回去（legalMoves 变空、说明条显示「现在不能出」）。
-    // 把当前座位的 isAI 摘掉，driveAI 触发时会直接 return，状态就此定格。
-    G.players[G.current].isAI = false;
+    // 竞态防护：开局 900ms 内可能已经有人抽到炸弹（pendingBomb），
+    // 也可能有 AI 回合正在收尾。不清掉待放回状态的话，legalMoves 会正确地返回空，
+    // 截图就会退化成「现在不能出」的普通说明条，而不是目标栏。
+    G.pendingBomb = null;
+    G.players.forEach(function (p) { if (p.id !== App.humanId) p.isAI = false; });
     App.busy = false;
     // 保证手里有一张需要目标的牌（求饶），且至少两个对手可被指定
     var me = G.players[App.humanId];
@@ -524,6 +572,13 @@ window.addEventListener('load', function () {
 });
 `;
 
+/* ---- 驱动脚本 10：手机开局设置（停在弹窗，只给截图打完成标记） ---- */
+const mobileSetupScript = `
+window.addEventListener('load', function () {
+  setTimeout(function () { document.title = 'MOBILE_READY'; }, 400);
+});
+`;
+
 console.log('\n生成截图 → ' + outDir + '\n');
 
 (async function main() {
@@ -541,6 +596,7 @@ console.log('\n生成截图 → ' + outDir + '\n');
     const placeFile = makeDriven('_driven-mobile-place.html', placeScript);
     const targetFile = makeDriven('_driven-mobile-target.html', targetScript);
     const floaterFile = makeDriven('_driven-floater.html', floaterScript);
+    const setupFile = makeDriven('_driven-mobile-setup.html', mobileSetupScript);
     const shots = [
       ['06-mobile-390.png', mobileFile, 390, 844],
       ['07-mobile-360.png', mobileFile, 360, 640],
@@ -549,13 +605,14 @@ console.log('\n生成截图 → ' + outDir + '\n');
       ['10-mobile-390-inspect.png', inspectFile, 390, 844],  // 说明条展开（选中可出的牌）
       ['11-mobile-390-place.png', placeFile, 390, 844],      // 放置条展开（炸弹放回）
       ['12-mobile-390-target.png', targetFile, 390, 844],    // 目标栏（触摸选中即选目标）
-      ['13-floater-shuffle.png', floaterFile, 390, 844]      // 事件横幅 + 洗牌 riffle（冻结帧）
+      ['13-floater-shuffle.png', floaterFile, 390, 844],     // 事件横幅 + 洗牌 riffle（冻结帧）
+      ['14-mobile-390-setup.png', setupFile, 390, 844, 'true'] // 手机开局弹窗（不点开始）
     ];
     const chrome = await launchCdpChrome();
     const browser = await cdpConnect(chrome.browserWs);
     const page = await cdpConnect(chrome.pageWs);
     try {
-      for (const s of shots) await shootMobile(page, s[0], s[1], s[2], s[3]);
+      for (const s of shots) await shootMobile(page, s[0], s[1], s[2], s[3], s[4]);
     } finally {
       page.close();
       try { await browser.send('Browser.close'); } catch (e) {}

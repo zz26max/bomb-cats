@@ -317,6 +317,19 @@ console.log('\n[5] 端到端对局');
   const AI = require(path.join(rootDir, 'src/ai/ai.js'));
   const RNG = require(path.join(rootDir, 'src/core/rng.js'));
 
+  // 否决窗口：AI 自己决定是否打断，真人座位（0）在模拟里一律放弃
+  function settle(G) {
+    let guard = 0;
+    while (G.pendingAction && guard++ < 50) {
+      const pid = Engine.pendingResponder(G);
+      if (pid == null) break;
+      const uid = pid === 0 ? null : AI.chooseNope(G, pid, 'normal');
+      const r = uid != null ? Engine.respondNope(G, pid, uid) : Engine.passResponse(G, pid);
+      if (!r.ok) throw new Error('settle(' + pid + '): ' + r.error);
+    }
+    if (G.pendingAction) throw new Error('否决窗口未能结算');
+  }
+
   let ok = 0;
   for (let seed = 1; seed <= 50; seed++) {
     const rng = RNG.seeded(seed);
@@ -330,12 +343,16 @@ console.log('\n[5] 端到端对局');
         if (G.turnEndPending) Engine.resumeAfterPlacement(G, o);
         continue;
       }
+      if (G.pendingAction) { settle(G); continue; }
       const isHuman = pid === 0;
       const pick = isHuman ? null : AI.chooseCard(G, pid, 'normal');
       if (pick) {
         const t = pick.needsTarget ? AI.chooseTarget(G, pid, pick, 'normal') : undefined;
         const r = Engine.playCard(G, pid, pick.card.uid, t);
-        if (r.ok) continue;
+        if (r.ok) {
+          if (G.pendingAction) settle(G);
+          continue;
+        }
       }
       Engine.endTurn(G, pid);
     }

@@ -121,7 +121,9 @@
       const d = document.createElement('div');
       d.className = 'opponent';
       d.dataset.pid = p.id;
-      if (state.phase === 'playing' && p.id === state.current) d.classList.add('active');
+      const isActive = state.phase === 'playing' && p.id === state.current;
+      if (isActive) d.classList.add('active');
+      if (isActive && p.isAI) d.classList.add('thinking');
       if (!p.alive) d.classList.add('dead');
       // 出局是「发生过的时刻」，不该是静止的属性：活→死的那一次渲染播倒下动画
       if (oppWasAlive.get(p.id) === true && !p.alive) d.classList.add('dying');
@@ -154,7 +156,7 @@
 
       const badge = document.createElement('span');
       badge.className = 'badge';
-      badge.textContent = p.isAI ? 'AI' : '玩家';
+      badge.textContent = !p.alive ? '' : (isActive && p.isAI ? '思考中' : (p.isAI ? '' : '玩家'));
 
       head.append(nm, badge);
 
@@ -298,8 +300,8 @@
     const sr = stage.getBoundingClientRect();
     const label = flash.querySelector('.label');
     const labelH = label && label.getBoundingClientRect ? label.getBoundingClientRect().height : 20;
-    const w = 116;   // .draw-flash .card.draw-face 的尺寸
-    const h = 162;
+    const w = 132;   // .draw-flash .card.draw-face 的尺寸
+    const h = 184;
     const cx = sr.left + sr.width / 2;
     const cy = sr.top + sr.height * 0.46 + (labelH + 9) / 2;
     return { left: cx - w / 2, top: cy - h / 2, width: w, height: h };
@@ -345,12 +347,16 @@
    * 只负责视觉与提示（.can-draw 的呼吸光晕 / cursor / title），
    * 真正的判定在 main.js 的 canHumanDraw()，两边用同一套条件。
    * 炸弹放回模式下这个状态是关的——那时点击归 enableBombPlacement() 管。
+   * label：跳过/攻击让本回合抽牌数为 0 时，牌堆仍是结束入口，但不能写「点击抽牌」。
    */
-  function setPileDrawable(on) {
+  function setPileDrawable(on, label) {
     const stack = el.pileStack;
     if (!stack) return;
+    const text = label || '点击抽牌';
     stack.classList.toggle('can-draw', !!on);
-    stack.title = on ? '点击抽牌' : '';
+    stack.title = on ? (text === '结束回合' ? '点击结束回合（本回合不抽牌）' : text) : '';
+    const cue = document.querySelector('.draw-cue');
+    if (cue) cue.textContent = text;
   }
 
   /* ---------------- 放炸弹预览（插入位置横线 + 文案） ---------------- */
@@ -996,7 +1002,19 @@
   /**
    * 爆炸精灵图：boom-sheet.webp 是 6 列 × 2 行、每帧 512×512、共 12 帧。
    * 用一个 div 逐帧切换 background-position 播完两行。
+   *
+   * 注意：这些元素必须挂在普通 div 上。canvas 的后备子节点在支持 canvas 的浏览器里
+   * 根本不会被绘制——之前挂在 <canvas id="fx"> 里，爆炸和冲击环其实一直看不见。
    */
+  let fxLayer = null;
+  function ensureFxLayer() {
+    if (fxLayer && fxLayer.parentNode) return fxLayer;
+    fxLayer = document.createElement('div');
+    fxLayer.className = 'fx-layer';
+    (document.body || document.documentElement).appendChild(fxLayer);
+    return fxLayer;
+  }
+
   function boomAt(x, y, scale) {
     const s = scale || 1;
     const box = document.createElement('div');
@@ -1005,7 +1023,7 @@
     box.style.top = y + 'px';
     box.style.width = (150 * s) + 'px';
     box.style.height = (150 * s) + 'px';
-    el.fx.appendChild(box);
+    ensureFxLayer().appendChild(box);
     // 动画约 0.7s，播完移除
     setTimeout(() => box.remove(), 780);
   }
@@ -1076,23 +1094,61 @@
     burst(r.left + r.width / 2, r.top + r.height / 2, 46);
   }
 
-  /** 攻击命中的冲击环：在受害者位置炸开一圈红环再消散（攻击的视觉落点） */
+  /** 攻击命中的冲击环：在受害者位置炸开一圈红环 + 一张手绘冲击波（攻击的视觉落点） */
   function impactAtPlayer(pid) {
     const node = document.querySelector('.opponent[data-pid="' + pid + '"]');
     const target = node || document.querySelector('#myPlate');
-    if (!target || !el.fx) return;
+    if (!target) return;
     const r = target.getBoundingClientRect();
+    const cx = r.left + r.width / 2;
+    const cy = r.top + r.height / 2;
+    const layer = ensureFxLayer();
+
     const ring = document.createElement('div');
     ring.className = 'impact-ring';
-    ring.style.left = (r.left + r.width / 2) + 'px';
-    ring.style.top = (r.top + r.height / 2) + 'px';
-    el.fx.appendChild(ring);
+    ring.style.left = cx + 'px';
+    ring.style.top = cy + 'px';
+    layer.appendChild(ring);
     setTimeout(() => { if (ring.parentNode) ring.parentNode.removeChild(ring); }, 600);
+
+    const shock = document.createElement('div');
+    shock.className = 'shock-wave';
+    const size = node ? 230 : 190;
+    shock.style.left = cx + 'px';
+    shock.style.top = cy + 'px';
+    shock.style.width = size + 'px';
+    shock.style.height = size + 'px';
+    layer.appendChild(shock);
+    setTimeout(() => { if (shock.parentNode) shock.parentNode.removeChild(shock); }, 700);
+  }
+
+  /** 拆除成功：受害者位置亮起一圈绿色安全光 */
+  function defuseAtPlayer(pid) {
+    const node = document.querySelector('.opponent[data-pid="' + pid + '"]');
+    const target = node || document.querySelector('#myPlate');
+    if (!target) return;
+    const r = target.getBoundingClientRect();
+    const glow = document.createElement('div');
+    glow.className = 'defuse-burst';
+    glow.style.left = (r.left + r.width / 2) + 'px';
+    glow.style.top = (r.top + r.height / 2) + 'px';
+    ensureFxLayer().appendChild(glow);
+    setTimeout(() => { if (glow.parentNode) glow.parentNode.removeChild(glow); }, 900);
+  }
+
+  /** 回合落座：给新回合的座位一个短促的聚光/弹入 */
+  function turnSpotlight(pid) {
+    const node = document.querySelector('.opponent[data-pid="' + pid + '"]') || document.querySelector('#myPlate');
+    if (!node) return;
+    node.classList.remove('turn-in');
+    void node.offsetWidth;
+    node.classList.add('turn-in');
+    setTimeout(() => node.classList.remove('turn-in'), 780);
   }
 
   /** 给玩家卡片加一个短暂的动画 class */
   function pulsePlayer(pid, cls) {
-    const node = document.querySelector('.opponent[data-pid="' + pid + '"]');
+    const node = document.querySelector('.opponent[data-pid="' + pid + '"]') || document.querySelector('#myPlate');
     if (!node) return;
     node.classList.remove(cls);
     void node.offsetWidth;
@@ -1167,7 +1223,8 @@
     View: {
       el, createCard, createPeekCard,
       renderOpponents, renderStage, renderHand, setPrompt, renderLog,
-      floater, shake, flash, burst, burstAtPlayer, impactAtPlayer, pulsePlayer, showPeek,
+      floater, shake, flash, burst, burstAtPlayer, impactAtPlayer, defuseAtPlayer, pulsePlayer,
+      turnSpotlight, showPeek,
       showDrawnCard, showOpponentDraw, bumpDeck, shufflePile, boomAt, boomAtPlayer, catArt, ASSET,
       setPileDrawable, pulseTurnCue, resetHand,
       showPlaceMarker, hidePlaceMarker, placeMarkerText,

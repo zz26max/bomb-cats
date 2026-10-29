@@ -22,6 +22,7 @@ const ROOT = path.join(__dirname, '..');
 const Engine = require('../src/core/engine.js');
 const RNG = require('../src/core/rng.js');
 const { accept, WsSocket } = require('./ws.js');
+const { eventsForSeat } = require('./redact.js');
 
 /* ---------------- 静态文件 ---------------- */
 
@@ -57,6 +58,11 @@ function serveStatic(req, res) {
 
 const rooms = new Map();                    // code -> room
 const GRACE_MS = 90 * 1000;                 // 断线宽限：超时未归，房间解散（Wesnoth 先例 90s）
+// 否决窗口的思考时间：太短来不及读牌，太长会把牌桌拖住。
+// 测试可用 NOPE_TIMEOUT_MS 环境变量缩短。
+const NOPE_TIMEOUT_MS = Math.max(500, parseInt(process.env.NOPE_TIMEOUT_MS || '8000', 10) || 8000);
+// 测试固定种子：设置后每局都用同一副牌，方便端到端断言否决窗口
+const FIXED_SEED = process.env.BOMBCATS_SEED ? (parseInt(process.env.BOMBCATS_SEED, 10) >>> 0) : null;
 const CODE_ALPHABET = '23456789ABCDEFGHJKMNPQRSTUVWXYZ';   // 去掉易混的 0/1/I/L/O
 
 const rnd4 = () => CODE_ALPHABET[crypto.randomInt(CODE_ALPHABET.length)];
@@ -83,6 +89,8 @@ function createRoom(conn, name) {
     ended: false,
     G: null,
     lastPeekSeat: -1,
+    nopeTimer: null,         // 当前否决窗口的超时计时器
+    respondDeadline: 0,      // 发给客户端的截止时间戳
     players: [{ seat: 0, name: name || '玩家 1', token: newToken(), conn: null, since: Date.now() }],
     graceTimer: null
   };
@@ -122,6 +130,10 @@ function onSeatDisconnect(room, seat) {
 
   const anyone = room.players.some(x => x.conn);
   if (!anyone) { destroyRoom(room); return; }
+  // 掉线的人不能卡住否决窗口：重排一次，由 promptResponder 转入自动放过
+  if (room.G && room.G.pendingAction && Engine.pendingResponder(room.G) === seat) {
+    promptResponder(room);
+  }
   if (room.started && !room.ended && !room.graceTimer) {
     room.graceTimer = setTimeout(() => {
       room.graceTimer = null;
@@ -136,6 +148,7 @@ function onSeatDisconnect(room, seat) {
 
 function destroyRoom(room) {
   stopGraceTimer(room);
+  clearNopeTimer(room);
   room.players.forEach(p => { if (p.conn) { p.conn._room = null; p.conn.close(); p.conn = null; } });
   rooms.delete(room.code);
 }
@@ -167,22 +180,8 @@ function snapshots(room) {
 }
 
 /**
- * 事件按座位脱敏。
- *   draw.card     抽到的牌：只给本人（客户端本来就有「对手抽牌不亮牌面」的分支）
- *   peek.cards    预测未来看到的牌：只给本人
- *   place-bomb.position  炸弹插回位置：只给本人（实体桌游里这也是私密信息）
- *   transfer.card 求饶/帮忙转移的牌：公开（引擎代选牌，与离线一致；README 已记取舍）
+ * 广播一条 update：先换快照再播事件（与离线 runAction 的顺序一致）
  */
-function eventsForSeat(events, seat) {
-  return events.map(e => {
-    if (e.type === 'draw' && e.player !== seat) return Object.assign({}, e, { card: null });
-    if (e.type === 'peek' && e.player !== seat) return Object.assign({}, e, { cards: null });
-    if (e.type === 'place-bomb' && e.player !== seat) return Object.assign({}, e, { position: null });
-    return e;
-  });
-}
-
-/** 广播一条 update：先换快照再播事件（与离线 runAction 的顺序一致） */
 function broadcastUpdate(room, events) {
   const snaps = snapshots(room);
   room.players.forEach(p => {
@@ -210,10 +209,94 @@ function broadcast(room, msg) {
   room.players.forEach(p => { if (p.conn) p.conn.send(text); });
 }
 
+/* ---------------- 否决窗口 ----------------
+   窗口状态由引擎维护（pendingAction），服务器负责：
+   - 只把「现在轮到你回应」的邀请发给对应座位（谁手里有否决是隐藏信息）；
+   - 超时自动放过，避免一个人离开就卡住牌桌；
+   - 回应成功后广播新快照，再邀请下一位候选。 */
+
+function clearNopeTimer(room) {
+  if (room.nopeTimer) { clearTimeout(room.nopeTimer); room.nopeTimer = null; }
+  room.respondDeadline = 0;
+}
+
+/** 给当前回应者发私有邀请；掉线的人短延时后自动放过 */
+function promptResponder(room) {
+  clearNopeTimer(room);
+  const G = room.G;
+  if (!G || !G.pendingAction || room.ended) return;
+  const seat = Engine.pendingResponder(G);
+  if (seat == null) return;
+  const p = room.players[seat];
+
+  if (!p || !p.conn) {
+      room.nopeTimer = setTimeout(() => {
+      room.nopeTimer = null;
+      const back = room.players[seat];
+      if (back && back.conn) { promptResponder(room); return; }   // 人回来了，重新邀请
+          autoPass(room, seat);
+    }, 350);
+    return;
+  }
+
+  room.respondDeadline = Date.now() + NOPE_TIMEOUT_MS;
+  p.conn.send(JSON.stringify({ t: 'respond', deadline: room.respondDeadline }));
+  room.nopeTimer = setTimeout(() => {
+    room.nopeTimer = null;
+    autoPass(room, seat);
+  }, NOPE_TIMEOUT_MS);
+}
+
+/** 超时 / 掉线：视为放过，继续窗口或结算原牌 */
+function autoPass(room, seat) {
+  const G = room.G;
+  if (!G || !G.pendingAction || Engine.pendingResponder(G) !== seat) return;
+  const r = Engine.passResponse(G, seat);
+  if (!r.ok) return;
+  afterResponse(room, r);
+}
+
+/** 回应结算后的广播与窗口推进 */
+function afterResponse(room, r) {
+  const G = room.G;
+  if (!G) return;
+  const peek = (r.events || []).find(e => e.type === 'peek');
+  if (peek) room.lastPeekSeat = peek.player;
+  if (G.phase === 'over') { room.ended = true; clearNopeTimer(room); }
+  broadcastUpdate(room, r.events || []);
+  if (!room.ended && G.pendingAction) promptResponder(room);
+}
+
+/** 收到某座的回应：nope=true 打出否决，否则放过 */
+function applyResponse(room, seat, useNope) {
+  const G = room.G;
+  if (!G || room.ended) return sendErr(room, seat, '对局不在进行中');
+  if (!G.pendingAction || Engine.pendingResponder(G) !== seat) {
+    return sendErr(room, seat, '现在轮不到你回应');
+  }
+
+  let r = null;
+  if (useNope) {
+    const me = G.players[seat];
+    const nope = me && me.hand ? me.hand.find(c => c.type === 'nope') : null;
+    if (!nope) return sendErr(room, seat, '你手里没有否决');
+    r = Engine.respondNope(G, seat, nope.uid);
+  } else {
+    r = Engine.passResponse(G, seat);
+  }
+  if (!r.ok) return sendErr(room, seat, r.error || '回应无效');
+
+  clearNopeTimer(room);
+  afterResponse(room, r);
+}
+
 /* ---------------- 对局驱动 ---------------- */
 
 function startGame(room) {
-  const rng = RNG.seeded((Date.now() ^ (crypto.randomInt(0xffffffff))) >>> 0);
+  const seed = FIXED_SEED != null
+    ? FIXED_SEED
+    : ((Date.now() ^ (crypto.randomInt(0xffffffff))) >>> 0);
+  const rng = RNG.seeded(seed);
   room.G = Engine.createGame({
     playerCount: room.players.length,
     names: room.players.map(p => p.name),
@@ -224,6 +307,7 @@ function startGame(room) {
   room.G.players.forEach(p => { p.isAI = false; });
   room.started = true;
   room.lastPeekSeat = -1;
+  clearNopeTimer(room);
 
   room.players.forEach(p => {
     if (!p.conn) return;
@@ -261,9 +345,12 @@ function applyAction(room, seat, action) {
   }
 
   if (!r.ok) return sendErr(room, seat, r.error || '动作无效');
-  if (r.events.some(e => e.type === 'peek')) room.lastPeekSeat = seat;
-  if (G.phase === 'over') room.ended = true;
+  const peek = (r.events || []).find(e => e.type === 'peek');
+  if (peek) room.lastPeekSeat = peek.player != null ? peek.player : seat;
+  if (G.phase === 'over') { room.ended = true; clearNopeTimer(room); }
   broadcastUpdate(room, r.events);
+  // 有牌进了否决窗口：先让所有人拿到快照，再私下邀请第一位候选
+  if (!room.ended && G.pendingAction) promptResponder(room);
 }
 
 function sendErr(room, seat, msg) {
@@ -288,6 +375,7 @@ server.on('upgrade', (req, socket) => {
     if (room) {
       const seat = conn._seat;
       if (msg.t === 'act') { applyAction(room, seat, msg); return; }
+      if (msg.t === 'respond') { applyResponse(room, seat, !!msg.nope); return; }
       if (msg.t === 'leave') {
         const p = room.players[seat];
         if (p) p.conn = null;
@@ -331,6 +419,10 @@ server.on('upgrade', (req, socket) => {
         conn.send(JSON.stringify({ t: 'started', state: snap, moves: snap.moves }));
         broadcastUpdate(r, []);      // 其他人收到 seat-back + 新快照
         broadcast(r, { t: 'seat-back', seat: p.seat });
+        // 重连回来的人可能正轮到回应否决：补发邀请
+        if (r.G && r.G.pendingAction && Engine.pendingResponder(r.G) === p.seat) {
+          promptResponder(r);
+        }
       } else {
         broadcastLobby(r);
       }
@@ -341,7 +433,7 @@ server.on('upgrade', (req, socket) => {
 
   conn.onClose(() => {
     const room = conn._room;
-    if (room && conn._seat != null && room.players[conn._seat] && room.players[conn._seat].conn === conn) {
+      if (room && conn._seat != null && room.players[conn._seat] && room.players[conn._seat].conn === conn) {
       onSeatDisconnect(room, conn._seat);
     }
   });

@@ -41,6 +41,9 @@ class WsSocket {
     const dead = () => this._shutdown();
     socket.on('close', dead);
     socket.on('error', dead);
+    // HTTP upgrade 的 socket 默认 allowHalfOpen：对端 FIN 只发 'end'，不主动 close。
+    // 不在这里收尾，掉线要等到下一次写失败才被发现（否决窗口会白等满超时）。
+    socket.on('end', dead);
     socket.setNoDelay(true);
   }
 

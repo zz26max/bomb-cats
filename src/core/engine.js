@@ -62,7 +62,8 @@
       log: [],
       seenTop: [],          // 「预测未来」看到的牌（仅本人可见）
       lastAutoEnd: false,
-      turnEnded: false      // 本次「结束回合」是否已经结算过抽牌
+      turnEnded: false,     // 本次「结束回合」是否已经结算过抽牌
+      pendingAction: null   // 已打出、等待否决窗口结算的牌
     };
 
     // 玩家
@@ -235,10 +236,11 @@
   /* 公开 API                                                            */
   /* ------------------------------------------------------------------ */
 
-  /** 打出卡牌 */
+  /** 打出卡牌：先进入否决窗口，窗口结算后效果才真正生效 */
   function playCard(G, pid, cardUid, target) {
     const events = [];
     if (G.phase !== 'playing') return { ok: false, error: '对局已结束', events };
+    if (G.pendingAction) return { ok: false, error: '等待否决结算', events };
     if (pid !== G.current) return { ok: false, error: '还没轮到你', events };
 
     const found = findInHand(G, pid, cardUid);
@@ -250,6 +252,8 @@
     if (card.type === 'defuse') return { ok: false, error: '拆除只能在抽到炸弹时使用', events };
     // 炸弹猫不可主动打出（正常情况下它也不会出现在手牌里，这里兜底防止规则被绕过）
     if (card.type === 'bomb') return { ok: false, error: '炸弹猫不能主动打出', events };
+    // 否决只在「有人出牌」之后的回应窗口里使用，不能当普通手牌打
+    if (card.type === 'nope') return { ok: false, error: '否决只能在别人出牌后使用', events };
 
     // 需要目标的牌
     let targetPlayer = null;
@@ -264,13 +268,114 @@
       }
     }
 
-    // 从手牌移除并进弃牌堆
+    // 从手牌移除并进弃牌堆（即使随后被否决，打出的牌也不收回）
     found.player.hand.splice(found.index, 1);
     G.discard.push(card);
-    // 打出牌后，本人之前看到的顶牌信息仍有效（自己没抽牌），但顺序可能因洗牌变化
 
-    const base = { type: 'play', player: pid, card: clone(card), target: target != null ? target : null };
-    events.push(base);
+    events.push({ type: 'play', player: pid, card: clone(card), target: target != null ? target : null });
+
+    // 进入否决窗口：从下家起依次询问手持否决的玩家，直到无人再回应。
+    // 没人握有否决时同步结算，保持原本「点完就出结果」的手感。
+    G.pendingAction = {
+      player: pid,
+      card: clone(card),
+      target: target != null ? target : null,
+      nopes: [],
+      queue: nopeQueue(G, pid, pid),
+      awaiting: null
+    };
+    G.pendingAction.awaiting = G.pendingAction.queue.length ? G.pendingAction.queue[0] : null;
+
+    if (G.pendingAction.awaiting == null) {
+      const res = finishPendingAction(G, events);
+      return Object.assign({ ok: true, events, pending: false }, res);
+    }
+    return { ok: true, events, pending: true };
+  }
+
+  /**
+   * 否决窗口的候选顺序：从最后出牌的人下家开始绕一圈，
+   * 排除最后出牌的人本人（不能否决自己打出的牌）。
+   */
+  function nopeQueue(G, fromId, excludeId) {
+    const out = [];
+    const n = G.players.length;
+    for (let step = 1; step <= n; step++) {
+      const id = (fromId + step) % n;
+      if (id === excludeId) continue;
+      const p = G.players[id];
+      if (p.alive && p.hand.some(c => c.type === 'nope')) out.push(id);
+    }
+    return out;
+  }
+
+  /** 当前轮到谁回应否决（没有窗口时返回 null） */
+  function pendingResponder(G) {
+    return G.pendingAction ? G.pendingAction.awaiting : null;
+  }
+
+  /** 打出一张否决：窗口重置，其他持否决的玩家重新获得一次回应机会 */
+  function respondNope(G, pid, cardUid) {
+    const events = [];
+    if (G.phase !== 'playing') return { ok: false, error: '对局已结束', events };
+    const pa = G.pendingAction;
+    if (!pa || pa.awaiting !== pid) return { ok: false, error: '现在不能打出否决', events };
+    const found = findInHand(G, pid, cardUid);
+    if (!found || found.card.type !== 'nope') return { ok: false, error: '请选择一张否决', events };
+
+    found.player.hand.splice(found.index, 1);
+    G.discard.push(found.card);
+    pa.nopes.push({ player: pid, card: clone(found.card) });
+    events.push({ type: 'nope', player: pid, card: clone(found.card), chain: pa.nopes.length });
+    pushLog(G, 'action', `${player(G, pid).name} 打出了「否决」（第 ${pa.nopes.length} 张）。`);
+
+    pa.queue = nopeQueue(G, pid, pid);
+    pa.awaiting = pa.queue.length ? pa.queue[0] : null;
+    if (pa.awaiting == null) {
+      const res = finishPendingAction(G, events);
+      return Object.assign({ ok: true, events, pending: false }, res);
+    }
+    return { ok: true, events, pending: true };
+  }
+
+  /** 放过：不否决，轮到下一位候选；无人再回应时结算 */
+  function passResponse(G, pid) {
+    const events = [];
+    const pa = G.pendingAction;
+    if (!pa || pa.awaiting !== pid) return { ok: false, error: '现在轮不到你回应', events };
+    pa.queue.shift();
+    pa.awaiting = pa.queue.length ? pa.queue[0] : null;
+    if (pa.awaiting == null) {
+      const res = finishPendingAction(G, events);
+      return Object.assign({ ok: true, events, pending: false }, res);
+    }
+    return { ok: true, events, pending: true };
+  }
+
+  /** 窗口关闭：否决张数为奇数则原牌无效，偶数则正常生效 */
+  function finishPendingAction(G, events) {
+    const pa = G.pendingAction;
+    if (!pa) return { ok: false, error: '没有待结算的牌', events };
+    G.pendingAction = null;
+
+    if (pa.nopes.length % 2 === 1) {
+      const last = pa.nopes[pa.nopes.length - 1];
+      events.push({
+        type: 'cancel', player: pa.player, target: pa.card.type,
+        by: last ? last.player : null, chain: pa.nopes.length
+      });
+      pushLog(G, 'action', `「${pa.card.name}」被 ${last ? player(G, last.player).name : '否决'} 否决，没有生效。`);
+      return { events };
+    }
+    return Object.assign({ events }, applyCardEffect(G, pa, events) || {});
+  }
+
+  /** 结算一张已通过否决窗口的牌 */
+  function applyCardEffect(G, action, events) {
+    const pid = action.player;
+    const card = action.card;
+    const def = CARDS[card.type];
+    const targetPlayer = action.target != null ? player(G, action.target) : null;
 
     switch (card.type) {
       case 'see': {
@@ -306,6 +411,10 @@
       case 'favor':
       case 'help': {
         const t = targetPlayer;
+        if (!t) {
+          events.push({ type: 'noop', player: pid, reason: '目标已不存在' });
+          break;
+        }
         // 规则约束：不能让一名存活玩家被掏空手牌。
         // 空手玩家在抽到炸弹时毫无还手之力，等同直接判死，因此最后一张牌不可被要走。
         const giveIdx = chooseGive(t, card.type, G);
@@ -327,20 +436,6 @@
         pushLog(G, 'action', `${player(G, pid).name} 对 ${t.name} 使用了「${def.name}」，获得 1 张牌。`);
         break;
       }
-      case 'nope': {
-        // 基础版把否决实现为「反制窗口」：记录本次动作可被否决，
-        // 由 UI/AI 在窗口期内选择是否打出否决，见 resolveResponse 流程。
-        events.push({ type: 'nope', player: pid, cancelable: !!G.lastAction });
-        if (G.lastAction && !G.lastAction.canceled) {
-          G.lastAction.canceled = true;
-          G.lastAction.canceledBy = pid;
-          events.push({ type: 'cancel', target: G.lastAction.type, by: pid });
-          pushLog(G, 'action', `${player(G, pid).name} 用「否决」取消了上一张牌。`);
-        } else {
-          pushLog(G, 'action', `${player(G, pid).name} 使用了「否决」。`);
-        }
-        break;
-      }
       case 'draw2': {
         const drawn = [];
         for (let i = 0; i < 2; i++) {
@@ -348,17 +443,17 @@
           if (r.exploded) {
             // 摸两张途中炸了：如果还有其他人活着，回合要交给下家
             if (G.phase !== 'over') advanceTurn(G, events, true);
-            return { ok: true, events, exploded: true };
+            return { exploded: true };
           }
           if (r.empty) break;
           if (r.needsPlacement) {
             // 抽到炸弹但用拆除化解了：本回合暂停，等放回炸弹后由 resumeAfterPlacement 继续
             G.turnEndPending = true;
-            return { ok: true, events, needsPlacement: true, turnPaused: true };
+            return { needsPlacement: true, turnPaused: true };
           }
           if (r.card) drawn.push(clone(r.card));
         }
-        if (G.phase === 'over') return { ok: true, events };
+        if (G.phase === 'over') return {};
         events.push({ type: 'draw2', player: pid, cards: drawn });
         pushLog(G, 'action', `${player(G, pid).name} 使用了「摸两张」。`);
         break;
@@ -370,8 +465,7 @@
       default:
         break;
     }
-
-    return { ok: true, events };
+    return {};
   }
 
   /**
@@ -418,6 +512,7 @@
   function endTurn(G, pid) {
     const events = [];
     if (G.phase !== 'playing') return { ok: false, error: '对局已结束', events };
+    if (G.pendingAction) return { ok: false, error: '等待否决结算', events };
     if (G.pendingBomb) {
       return G.pendingBomb.player === pid
         ? { ok: false, error: '请先把炸弹放回牌堆', events }
@@ -508,6 +603,7 @@
   function legalMoves(G, pid) {
     const moves = { playable: [], needTarget: [], canEnd: false };
     if (G.phase !== 'playing' || pid !== G.current) return moves;
+    if (G.pendingAction) return moves;
     if (G.pendingBomb) return moves;
 
     const me = player(G, pid);
@@ -515,8 +611,9 @@
     const opponents = G.players.filter(p => p.alive && p.id !== pid && p.hand.length >= 2);
     const seen = new Set();
     me.hand.forEach(c => {
-      // 拆除与炸弹都不能主动打出：拆除只在抽到炸弹时用，炸弹根本不入牌局
-      if (c.type === 'defuse' || c.type === 'bomb') return;
+      // 拆除与炸弹都不能主动打出：拆除只在抽到炸弹时用，炸弹根本不入牌局；
+      // 否决只能用于回应别人打出的牌，不走普通出牌流程
+      if (c.type === 'defuse' || c.type === 'bomb' || c.type === 'nope') return;
       if (seen.has(c.type)) return;
       seen.add(c.type);
       const def = CARDS[c.type];
@@ -543,6 +640,14 @@
       discardTop: G.discard.length ? clone(G.discard[G.discard.length - 1]) : null,
       bombTotal: G.bombTotal || 0,
       pendingBomb: G.pendingBomb ? { player: G.pendingBomb.player } : null,
+      // 公开信息：谁打了什么、已经打出几张否决。不暴露「下一个该谁回应」，
+      // 否则等于告诉所有人谁手里攥着否决。
+      pendingAction: G.pendingAction ? {
+        player: G.pendingAction.player,
+        card: clone(G.pendingAction.card),
+        target: G.pendingAction.target,
+        nopes: G.pendingAction.nopes.map(n => ({ player: n.player, card: clone(n.card) }))
+      } : null,
       seenTop: G.seenTop.slice(),
       log: G.log.slice(-40),
       players: G.players.map(p => ({
@@ -558,6 +663,7 @@
     return {
       turn: G.turn, phase: G.phase, winner: G.winner, current: G.current,
       pendingDraws: G.pendingDraws, deckSize: G.deck.length, discardSize: G.discard.length,
+      pendingAction: G.pendingAction ? { player: G.pendingAction.player, card: G.pendingAction.card.type, nopes: G.pendingAction.nopes.length } : null,
       players: G.players.map(p => ({ id: p.id, name: p.name, alive: p.alive, hand: p.hand.map(c => c.type) })),
       deck: G.deck.map(c => c.type)
     };
@@ -565,7 +671,8 @@
 
   return {
     createGame, playCard, endTurn, placeBomb, resumeAfterPlacement,
+    respondNope, passResponse, pendingResponder,
     legalMoves, getState, dump,
-    _internal: { buildDeck, nextAlive, resolveDraw, makeCard }
+    _internal: { buildDeck, nextAlive, resolveDraw, makeCard, applyCardEffect }
   };
 });

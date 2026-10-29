@@ -14,6 +14,17 @@ function check(name, cond, detail) {
   else { fail++; console.log('  ✗ ' + name + (detail ? '  → ' + detail : '')); }
 }
 
+/** 把当前否决窗口里的候选逐一放过（无人愿意否决） */
+function passWindow(g) {
+  let guard = 0;
+  while (g.pendingAction && guard++ < 100) {
+    const pid = Engine.pendingResponder(g);
+    if (pid == null) break;
+    const r = Engine.passResponse(g, pid);
+    if (!r.ok) throw new Error('passResponse: ' + r.error);
+  }
+}
+
 /* ---------- 1. 牌堆构成 ---------- */
 console.log('\n[1] 牌堆与初始化');
 {
@@ -80,6 +91,51 @@ console.log('\n[1c] 抽到普通牌不应消耗拆除');
   check('抽到普通牌后手牌确实 +1', noCardAdded === 0, noCardAdded + ' 局异常');
 }
 
+/* ---------- 1d. 跳过牌 ---------- */
+// 「跳过」的规则价值就是本回合不抽牌。曾经界面仍提示「点击抽牌」，
+// 玩家打完牌看不出任何变化，误以为跳过期失效；这里锁死引擎侧的效果。
+console.log('\n[1d] 跳过牌取消本回合抽牌');
+{
+  const g = Engine.createGame({ playerCount: 3, rng: RNG.seeded(21), humanIndex: 0 });
+  g.current = 0;
+  g.pendingBomb = null;
+  g.pendingDraws = 1;
+  g.mustDraw = true;
+  const skip = Engine._internal.makeCard('skip');
+  g.players[0].hand.push(skip);
+  const deckBefore = g.deck.length;
+  const r = Engine.playCard(g, 0, skip.uid);
+  passWindow(g);                       // 其他座位可能握着否决，测试里一律放过
+  check('跳过可以打出', r.ok, r.error);
+  check('跳过把本回合抽牌数清零',
+    g.pendingDraws === 0 && g.mustDraw === false,
+    'pendingDraws=' + g.pendingDraws + ' mustDraw=' + g.mustDraw);
+  check('打出跳过本身不推进回合（由玩家点结束回合）', g.current === 0);
+  const r2 = Engine.endTurn(g, 0);
+  check('跳过后的结束回合不抽牌',
+    r2.ok && g.deck.length === deckBefore && !r2.events.some(e => e.type === 'draw'),
+    deckBefore + '->' + g.deck.length + ' events=' + r2.events.map(e => e.type).join(','));
+  check('跳过结算后轮到下一位玩家',
+    g.current === 1 && g.pendingDraws === 1,
+    'current=' + g.current + ' pending=' + g.pendingDraws);
+
+  // 被攻击（要抽 2 次）时打出跳过，两张都免掉
+  const g2 = Engine.createGame({ playerCount: 3, rng: RNG.seeded(22), humanIndex: 0 });
+  g2.current = 0;
+  g2.pendingBomb = null;
+  g2.pendingDraws = 2;
+  g2.mustDraw = true;
+  const skip2 = Engine._internal.makeCard('skip');
+  g2.players[0].hand.push(skip2);
+  const deck2 = g2.deck.length;
+  Engine.playCard(g2, 0, skip2.uid);
+  passWindow(g2);
+  const r3 = Engine.endTurn(g2, 0);
+  check('被攻击时打出跳过可免掉全部抽牌',
+    r3.ok && g2.deck.length === deck2,
+    deck2 + '->' + g2.deck.length);
+}
+
 /* ---------- 2. 随机对局压力测试 ---------- */
 console.log('\n[2] 400 局随机对战（随机策略）');
 {
@@ -97,6 +153,18 @@ console.log('\n[2] 400 局随机对战（随机策略）');
       if (g.phase === 'over') { ended = true; break; }
       const pid = g.current;
       const me = g.players[pid];
+
+      // 否决窗口：随机决定是否反制，覆盖连锁与奇偶结算
+      if (g.pendingAction) {
+        const rid = Engine.pendingResponder(g);
+        if (rid == null) { errors.push('否决窗口没有回应者'); break; }
+        const nope = g.players[rid].hand.find(c => c.type === 'nope');
+        const r = (nope && rng() < 0.4)
+          ? Engine.respondNope(g, rid, nope.uid)
+          : Engine.passResponse(g, rid);
+        if (!r.ok) { errors.push('response: ' + r.error); break; }
+        continue;
+      }
 
       // 处理待放回炸弹
       if (g.pendingBomb) {
@@ -161,6 +229,7 @@ console.log('\n[3] 规则细节');
   const atk = g.players[0].hand.find(c => c.type === 'attack');
   if (atk) {
     const r = Engine.playCard(g, 0, atk.uid);
+    passWindow(g);
     check('攻击打出成功', r.ok, r.error);
     const e = Engine.endTurn(g, 0);
     check('攻击后回合正常推进', e.ok, e.error);
@@ -213,6 +282,155 @@ console.log('\n[4] 状态快照');
   check('AI 手牌不可见', s.players[1].hand === null);
   check('快照不含牌堆内容', s.deck === undefined);
   check('快照可 JSON 序列化', (() => { try { JSON.stringify(s); return true; } catch (e) { return false; } })());
+}
+
+/* ---------- 5. 否决卡 ---------- */
+console.log('\n[5] 否决窗口');
+{
+  const mk = t => Engine._internal.makeCard(t);
+  const rig = (g, hands) => {
+    g.players.forEach((p, i) => { p.hand = (hands[i] || []).map(mk); });
+  };
+
+  // 5.1 无人持否决 → 不出窗口，直接结算
+  {
+    const g = Engine.createGame({ playerCount: 3, rng: RNG.seeded(31), humanIndex: 0 });
+    g.current = 0;
+    rig(g, [['attack', 'nothing'], ['nothing'], ['nothing']]);
+    const atk = g.players[0].hand[0];
+    const r = Engine.playCard(g, 0, atk.uid);
+    check('无人持否决时立即结算', r.ok && !r.pending && !g.pendingAction);
+    check('攻击立即生效', g.attackQueue === 2, 'attackQueue=' + g.attackQueue);
+  }
+
+  // 5.2 否决取消攻击
+  {
+    const g = Engine.createGame({ playerCount: 3, rng: RNG.seeded(32), humanIndex: 0 });
+    g.current = 0;
+    rig(g, [['attack', 'nothing'], ['nope', 'nothing'], ['nothing']]);
+    const atk = g.players[0].hand[0];
+    const nope = g.players[1].hand[0];
+
+    const r = Engine.playCard(g, 0, atk.uid);
+    check('有人持否决时产生回应窗口', r.ok && r.pending === true && !!g.pendingAction);
+    check('窗口从下家开始询问', Engine.pendingResponder(g) === 1);
+    check('窗口期不能结束回合', !Engine.endTurn(g, 0).ok);
+    check('窗口期没有普通可出牌', Engine.legalMoves(g, 0).playable.length === 0);
+    check('非回应者不能操作窗口', !Engine.passResponse(g, 2).ok);
+    check('快照公开待结算牌、但不暴露回应者', (() => {
+      const s = Engine.getState(g);
+      return !!s.pendingAction &&
+        s.pendingAction.card.type === 'attack' &&
+        s.pendingAction.awaiting === undefined;
+    })());
+
+    const rn = Engine.respondNope(g, 1, nope.uid);
+    check('否决可打出并关闭窗口', rn.ok && !g.pendingAction, rn.error);
+    check('否决与取消事件都发出',
+      rn.events.some(e => e.type === 'nope') &&
+      rn.events.some(e => e.type === 'cancel' && e.target === 'attack'));
+    check('被否决的攻击没有生效', g.attackQueue !== 2, 'attackQueue=' + g.attackQueue);
+    check('原牌与否决都进弃牌堆',
+      g.discard.some(c => c.uid === atk.uid) && g.discard.some(c => c.uid === nope.uid));
+    check('被否决的牌也不会回到手里',
+      !g.players[0].hand.some(c => c.uid === atk.uid) &&
+      !g.players[1].hand.some(c => c.uid === nope.uid));
+
+    const e = Engine.endTurn(g, 0);
+    check('否决后回合照常推进（只抽 1 张）',
+      e.ok && g.current === 1 && g.pendingDraws === 1,
+      'current=' + g.current + ' pending=' + g.pendingDraws);
+  }
+
+  // 5.3 连锁否决：偶数张 → 原牌恢复生效
+  {
+    const g = Engine.createGame({ playerCount: 3, rng: RNG.seeded(33), humanIndex: 0 });
+    g.current = 0;
+    rig(g, [['attack', 'nothing'], ['nope', 'nothing'], ['nope', 'nothing']]);
+    const atk = g.players[0].hand[0];
+    const n1 = g.players[1].hand[0];
+    const n2 = g.players[2].hand[0];
+
+    Engine.playCard(g, 0, atk.uid);
+    Engine.respondNope(g, 1, n1.uid);
+    check('一张否决后轮到其他持否决者', Engine.pendingResponder(g) === 2);
+    const r = Engine.respondNope(g, 2, n2.uid);
+    check('连锁否决后窗口关闭', r.ok && !g.pendingAction);
+    check('偶数张否决 → 原牌生效', g.attackQueue === 2, 'attackQueue=' + g.attackQueue);
+    check('偶数张否决不产生取消事件', !r.events.some(e => e.type === 'cancel'));
+  }
+
+  // 5.4 自己打出的牌被否决后，可以再否决回来
+  {
+    const g = Engine.createGame({ playerCount: 3, rng: RNG.seeded(34), humanIndex: 0 });
+    g.current = 0;
+    rig(g, [['attack', 'nope'], ['nope', 'nothing'], ['nothing']]);
+    const atk = g.players[0].hand[0];
+    const n0 = g.players[0].hand[1];
+    const n1 = g.players[1].hand[0];
+
+    Engine.playCard(g, 0, atk.uid);
+    Engine.respondNope(g, 1, n1.uid);
+    check('自己打出的牌被否决后可再次回应', Engine.pendingResponder(g) === 0);
+    const r = Engine.respondNope(g, 0, n0.uid);
+    check('再否决后攻击恢复生效', r.ok && !g.pendingAction && g.attackQueue === 2,
+      'attackQueue=' + g.attackQueue);
+  }
+
+  // 5.5 否决不能作为普通手牌打出
+  {
+    const g = Engine.createGame({ playerCount: 3, rng: RNG.seeded(35), humanIndex: 0 });
+    g.current = 0;
+    rig(g, [['nope', 'nothing'], ['nothing'], ['nothing']]);
+    const nope = g.players[0].hand[0];
+    const lm = Engine.legalMoves(g, 0);
+    check('legalMoves 不把否决列为可出',
+      !lm.playable.concat(lm.needTarget).some(m => m.type === 'nope'));
+    const r = Engine.playCard(g, 0, nope.uid);
+    check('playCard 拒绝普通打出否决', !r.ok && /否决/.test(r.error || ''), r.error || '居然成功了');
+  }
+
+  // 5.6 被否决的预测未来不留下任何牌面信息
+  {
+    const g = Engine.createGame({ playerCount: 3, rng: RNG.seeded(36), humanIndex: 0 });
+    g.current = 0;
+    rig(g, [['see'], ['nope', 'nothing'], ['nothing']]);
+    const see = g.players[0].hand[0];
+    const nope = g.players[1].hand[0];
+
+    const r = Engine.playCard(g, 0, see.uid);
+    check('预测未来在窗口期不提前亮牌', r.pending && g.seenTop.length === 0 && g.players[0].seen.length === 0);
+    const rn = Engine.respondNope(g, 1, nope.uid);
+    check('被否决的预测未来不留下信息',
+      rn.ok && g.seenTop.length === 0 && g.players[0].seen.length === 0 &&
+      !rn.events.some(e => e.type === 'peek'));
+  }
+
+  // 5.7 被否决的求饶不发生转移
+  {
+    const g = Engine.createGame({ playerCount: 3, rng: RNG.seeded(37), humanIndex: 0 });
+    g.current = 0;
+    rig(g, [['favor'], ['nope', 'nothing'], ['nothing', 'nothing']]);
+    const favor = g.players[0].hand[0];
+    const nope = g.players[1].hand[0];
+
+    Engine.playCard(g, 0, favor.uid, 2);
+    const rn = Engine.respondNope(g, 1, nope.uid);
+    check('被否决的求饶没有转移任何牌',
+      rn.ok && g.players[0].hand.length === 0 && g.players[2].hand.length === 2,
+      'p0=' + g.players[0].hand.length + ' p2=' + g.players[2].hand.length);
+  }
+
+  // 5.8 全部放过 → 原牌生效
+  {
+    const g = Engine.createGame({ playerCount: 3, rng: RNG.seeded(38), humanIndex: 0 });
+    g.current = 0;
+    rig(g, [['skip'], ['nope', 'nothing'], []]);
+    const skip = g.players[0].hand[0];
+    Engine.playCard(g, 0, skip.uid);
+    const r = Engine.passResponse(g, 1);
+    check('对全部放过后原牌生效', r.ok && !g.pendingAction && g.pendingDraws === 0);
+  }
 }
 
 console.log(`\n结果：${pass} 通过, ${fail} 失败\n`);

@@ -77,16 +77,16 @@
    *         也就是新手那种「攥着保命牌硬抽」的典型行为。
    */
   const PROFILES = {
-    easy:   { dodge: 0.00, see: 0.00, favor: 0.15, chaos: 0.75, naive: true },
-    normal: { dodge: 0.30, see: 0.10, favor: 0.15, chaos: 0.40, naive: false },
-    hard:   { dodge: 0.90, see: 0.60, favor: 0.80, chaos: 0.00, naive: false }
+    easy:   { dodge: 0.00, see: 0.00, favor: 0.15, chaos: 0.75, naive: true, nope: 0.16 },
+    normal: { dodge: 0.30, see: 0.10, favor: 0.15, chaos: 0.40, naive: false, nope: 0.60 },
+    hard:   { dodge: 0.90, see: 0.60, favor: 0.80, chaos: 0.00, naive: false, nope: 0.95 }
   };
 
-  /** 手牌中所有可打出的牌 */
+  /** 手牌中所有可打出的牌（否决只能用于回应，不在普通出牌候选里） */
   function handOptions(G, pid) {
     const me = G.players[pid];
     const opponents = G.players.filter(p => p.alive && p.id !== pid && p.hand.length >= 2);
-    return me.hand.filter(c => c.type !== 'defuse' && c.type !== 'bomb').map(c => ({
+    return me.hand.filter(c => c.type !== 'defuse' && c.type !== 'bomb' && c.type !== 'nope').map(c => ({
       card: c,
       needsTarget: CARDS[c.type].need === 'player',
       targets: opponents.map(p => p.id)
@@ -184,6 +184,66 @@
     return null;
   }
 
+  /**
+   * 评估「当前这张待结算的牌对自己有多大威胁」。
+   *
+   * 否决窗口按奇偶结算：偶数张否决 = 原牌生效，奇数张 = 原牌无效。
+   * 所以这里关心的不是「牌好不好」，而是「当前结果是否对我不利」：
+   *   - 别人的攻击正指向我 → 很想否决；
+   *   - 别人的求饶/帮忙正冲着我 → 很想否决；
+   *   - 我自己的牌被否决了 → 很想再否决回来；
+   *   - 别人的跳过/无效果/看牌 → 基本懒得管。
+   */
+  function nopeDesire(G, pid, pa) {
+    const type = pa.card.type;
+    const applies = pa.nopes.length % 2 === 0;
+    const mine = pa.player === pid;
+    let value = 0.05;
+
+    if (type === 'attack') {
+      const victim = Engine._internal.nextAlive(G, pa.player);
+      value = victim === pid ? 1.0 : 0.05;
+    } else if (type === 'favor' || type === 'help') {
+      value = pa.target === pid ? 0.95 : 0.08;
+    } else if (type === 'draw2') {
+      value = 0.45;
+    } else if (type === 'see') {
+      value = 0.18;
+    } else if (type === 'shuffle') {
+      value = 0.15;
+    } else if (type === 'skip') {
+      value = 0.12;
+    }
+
+    if (mine) {
+      const keep = type === 'nothing' ? 0.15 : (type === 'skip' ? 0.5 : 0.85);
+      return applies ? 0 : keep;
+    }
+    return applies ? value : 0;
+  }
+
+  /**
+   * 否决窗口里的决策：返回要打出的否决 uid，null 表示放过。
+   * 由调用方（main.js / 服务器的响应窗口）驱动，引擎只负责按顺序询问。
+   */
+  function chooseNope(G, pid, difficulty) {
+    const pa = G.pendingAction;
+    if (!pa) return null;
+    const me = G.players[pid];
+    if (!me || !me.alive) return null;
+    const nopes = me.hand.filter(c => c.type === 'nope');
+    if (!nopes.length) return null;
+
+    const desire = nopeDesire(G, pid, pa);
+    if (desire <= 0) return null;
+
+    const profile = PROFILES[difficulty] || PROFILES.normal;
+    // 手里不止一张时更舍得用；只剩一张时留给真正的致命时刻
+    const spare = nopes.length > 1 ? 1.15 : 1;
+    const chance = Math.min(0.98, desire * profile.nope * spare);
+    return G.rng() < chance ? nopes[0].uid : null;
+  }
+
   /** 选择目标：hard 优先打手牌最多的人（手里更可能藏着炸弹 / 更值得消耗） */
   function chooseTarget(G, pid, options, difficulty) {
     const ids = options.targets;
@@ -255,6 +315,7 @@
   return {
     bombRisk,
     chooseCard,
+    chooseNope,
     chooseTarget,
     chooseBombPosition,
     planTurn,

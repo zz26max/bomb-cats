@@ -12,6 +12,16 @@
 
   const $ = id => document.getElementById(id);
 
+  /**
+   * 玩家名是用户输入（联机时还可能是对手填的），拼进提示条的 HTML 前必须转义。
+   * 其他位置的名字都走 textContent / title / alt，不受影响。
+   */
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    }[c]));
+  }
+
   /* ---------------- 对局状态 ---------------- */
 
   const App = {
@@ -69,8 +79,9 @@
     if (App.busy) return false;
     if (App.online) {
       const s = App.online.state;
+      const responding = !!(App.online.respond && App.online.respond.pending);
       return !!s && s.phase === 'playing' && s.current === App.humanId &&
-             !s.pendingBomb && !App.awaitingTarget;
+             !s.pendingBomb && !s.pendingAction && !App.awaitingTarget && !responding;
     }
     const G = App.G;
     if (!G) return false;
@@ -78,6 +89,7 @@
     if (G.current !== App.humanId) return false;
     // 放炸弹模式：牌堆的点击归 enableBombPlacement() 的临时监听器，这里必须让开
     if (G.pendingBomb) return false;
+    if (G.pendingAction) return false;      // 上一张牌还在等否决窗口
     if (App.awaitingTarget) return false;
     return true;
   }
@@ -108,11 +120,20 @@
     let targetableIds = null;
 
     if (state.current === myId && state.phase === 'playing' && !App.busy) {
-      lm.playable.forEach(m => playable.add(m.cardUid));
-      lm.needTarget.forEach(m => playable.add(m.cardUid));
-      // 选中了需要目标的牌 → 高亮可选对手
-      if (App.awaitingTarget && App.selectedUid != null) {
-        const hit = lm.needTarget.find(m => m.cardUid === App.selectedUid);
+      // 合法动作按牌型去重（同一牌型只给一个 uid，给 AI 用），
+      // 但玩家手里可能有两张同名卡：UI 按牌型映射回所有同名卡，
+      // 否则第二张点下去会提示「现在不能出」，看起来像坏牌。
+      const types = new Set();
+      lm.playable.forEach(m => types.add(m.type));
+      lm.needTarget.forEach(m => types.add(m.type));
+      const me = state.players[myId];
+      if (me && me.hand) {
+        me.hand.forEach(c => { if (types.has(c.type)) playable.add(c.uid); });
+      }
+      // 选中了需要目标的牌 → 高亮可选对手（同样按牌型匹配，不看具体哪一张）
+      if (App.awaitingTarget && App.selectedUid != null && me && me.hand) {
+        const sel = me.hand.find(c => c.uid === App.selectedUid);
+        const hit = sel ? lm.needTarget.find(m => m.type === sel.type) : null;
         targetableIds = hit ? hit.targets : null;
       }
     }
@@ -122,36 +143,71 @@
     View.renderHand(state, myId, playable, App.selectedUid, App.awaitingTarget, App.newUid, App.incomingUid);
     View.renderLog(state.log);
 
-    // 结束回合按钮：轮到自己且不在动画中才能点
+    // 结束回合按钮：轮到自己、不在动画中、没在瞄准目标时才能点
     const isMyTurn = state.current === myId && state.phase === 'playing';
-    $('btnEnd').disabled = !isMyTurn || App.busy || !!state.pendingBomb;
+    const onlineResponding = !!(App.online && App.online.respond && App.online.respond.pending);
+    $('btnEnd').disabled = !isMyTurn || App.busy || !!state.pendingBomb || App.awaitingTarget ||
+      !!state.pendingAction || onlineResponding;
     $('btnHint').disabled = App.busy;
 
+    // 打出跳过/攻击后本回合抽牌数为 0：结束动作不再抽牌，
+    // 按钮与牌堆提示都必须改口，否则玩家会以为跳过没生效。
+    const noDrawTurn = isMyTurn && state.pendingDraws === 0;
+    const endLabel = $('btnEnd').querySelector('span');
+    if (endLabel) endLabel.textContent = noDrawTurn ? '结束回合' : '结束回合 · 抽牌';
+    $('btnEnd').title = noDrawTurn ? '本回合不抽牌，点击结束回合' : '结束回合并抽一张牌';
+
     // 牌堆的可点状态（金色呼吸光晕 / cursor / title），判定与点牌堆、空格完全一致
-    View.setPileDrawable(canHumanDraw());
+    View.setPileDrawable(canHumanDraw(), noDrawTurn ? '结束回合' : '点击抽牌');
 
     // 提示条
     if (state.phase === 'over') {
       const win = state.winner === myId;
-      View.setPrompt(win ? '<b>🎉 你赢了！</b>' : '<b>' + state.players[state.winner].name + '</b> 获胜', false);
+      View.setPrompt(win ? '<b>🎉 你赢了！</b>' : '<b>' + esc(state.players[state.winner].name) + '</b> 获胜', false);
     } else if (state.pendingBomb) {
       if (state.pendingBomb.player === myId) {
         View.setPrompt(placePrompt(), true);
       } else {
-        View.setPrompt('<b>' + state.players[state.pendingBomb.player].name + '</b> 正在放置炸弹…', false);
+        View.setPrompt('<b>' + esc(state.players[state.pendingBomb.player].name) + '</b> 正在放置炸弹…', false);
+      }
+    } else if (App.awaitingTarget && App.selectedUid != null) {
+      // 目标牌选中后，桌面端也要常驻一句「下一步点哪」，不能只靠一次飘字
+      View.setPrompt('<b>选择一名对手</b> 作为目标', false);
+    } else if (state.pendingAction) {
+      const pa = state.pendingAction;
+      const actor = state.players[pa.player];
+      const cardName = (CARDS[pa.card.type] && CARDS[pa.card.type].name) || pa.card.name || '一张牌';
+      const myWindow = App.online
+        ? onlineResponding
+        : !!(App.G && Engine.pendingResponder(App.G) === myId);
+      if (myWindow) {
+        View.setPrompt('<b>轮到你回应</b> · 是否否决「' + esc(cardName) + '」？', true);
+      } else if (pa.nopes.length) {
+        View.setPrompt('「' + esc(cardName) + '」已被否决 ' + pa.nopes.length + ' 次，等待回应…', false);
+      } else {
+        View.setPrompt('<b>' + esc(actor ? actor.name : '有人') + '</b> 的「' +
+          esc(cardName) + '」等待回应…', false);
       }
     } else if (state.current === myId) {
       const n = state.pendingDraws;
       // 触摸端没有键盘，「按空格」的提示只留给鼠标
       const kb = (App.input === 'mouse' && (root.innerWidth || 0) > 620) ? '（或按空格）' : '';
-      View.setPrompt(n > 1
-        ? '轮到你 · 被攻击，本回合要抽 <b>' + n + '</b> 张（点击牌堆）'
-        : '轮到你 · 出牌后点击牌堆' + kb + '抽牌', false);
+      View.setPrompt(n === 0
+        ? '轮到你 · 本回合不抽牌（点牌堆结束回合）'
+        : n > 1
+          ? '轮到你 · 被攻击，本回合要抽 <b>' + n + '</b> 张（点击牌堆）'
+          : '轮到你 · 出牌后点击牌堆' + kb + '抽牌', false);
     } else {
-      View.setPrompt('<b>' + state.players[state.current].name + '</b> 的回合…', false);
+      View.setPrompt('<b>' + esc(state.players[state.current].name) + '</b> 的回合…', false);
     }
 
+    // 联机的「待放回炸弹」是服务器直接推快照过来的，本地不会经过
+    // handlePlacementIfNeeded；这里兜底挂上牌堆的放置监听器（内部会先清理，重复调用安全）。
+    // 否则 1280px 桌面（放置条只在触摸 / 窄屏出现）点牌堆毫无反应，玩家会卡住。
+    if (state.pendingBomb && state.pendingBomb.player === myId) enableBombPlacement();
+
     // 触摸端：说明条 / 目标栏 / 放置条跟着状态走（桌面端两者都不显示）
+    refreshNopeBar();
     refreshPlaceBar();
     renderInspect();
   }
@@ -238,7 +294,7 @@
     const target = handTarget(card.uid);
     const flight = View.flyCard(View.drawFlashCardRect(), target && target.rect, {
       face: 'front', card: card, size: 'face',
-      scaleFrom: 1, scaleTo: target ? target.cw / 116 : 1,
+      scaleFrom: 1, scaleTo: target ? target.cw / 132 : 1,
       rotateFrom: 0, rotateTo: target ? target.rot : 0,
       ms: 340, lift: -24, easing: 'cubic-bezier(.25,.8,.3,1)'
     });
@@ -306,6 +362,11 @@
           SFX.play();
           if (e.player === App.humanId) await playHumanPlay(e);
           else await playAIPlay(e);
+          // 跳过没有抽牌事件，不补一句反馈的话，桌面上就像什么都没发生
+          if (e.card && e.card.type === 'skip') {
+            View.floater('跳过', 'var(--gold)', { sub: '本回合不抽牌' });
+            await delay(160);
+          }
           break;
         case 'draw': {
           SFX.draw();
@@ -365,24 +426,40 @@
           await delay(460);
           break;
         }
-        case 'nope':
-        case 'cancel':
+        case 'nope': {
           SFX.nope();
-          View.floater('否决', 'var(--red-2)', { sub: '上一张牌无效' });
-          await delay(360);
+          const chain = e.chain || 1;
+          // 奇数张否决让原牌失效，偶数张把它「翻」回生效——提示必须跟着奇偶走
+          View.floater('否决', 'var(--red-2)', {
+            sub: chain % 2 === 1 ? '这张牌不会生效' : '第 ' + chain + ' 张 · 效果恢复'
+          });
+          await delay(380);
           break;
+        }
+        case 'cancel': {
+          SFX.nope();
+          const def = CARDS[e.target];
+          View.floater('否决生效', 'var(--red-2)', {
+            sub: (def && def.name ? '「' + def.name + '」' : '上一张牌') + '没有生效'
+          });
+          await delay(440);
+          break;
+        }
         case 'defuse':
           SFX.defuse();
           View.floater('拆除成功', 'var(--green)', { sub: '危机解除' });
+          View.defuseAtPlayer(e.player);
           if (e.player === App.humanId) buzz(30);
-          await delay(400);
+          await delay(460);
           break;
         case 'place-bomb':
           SFX.click();
           break;
         case 'explode': {
           SFX.explode();
-          const boomName = App.G.players[e.player] ? App.G.players[e.player].name : '';
+          // 联机局没有本地 App.G（全新联机会话时它是 null），必须从当前状态源取名
+          const cs = curState();
+          const boomName = cs && cs.players[e.player] ? cs.players[e.player].name : '';
           View.floater('BOOM', 'var(--red-2)', { sub: boomName ? boomName + ' 炸出局' : undefined });
           if (e.player === App.humanId) buzz([60, 40, 90]);
           View.flash();
@@ -404,6 +481,7 @@
           break;
         case 'turn':
           SFX.turn();
+          View.turnSpotlight(e.player);
           // 轮到真人：牌堆与「结束回合」按钮各脉冲一次，提示「该你了」
           if (e.player === App.humanId) View.pulseTurnCue();
           // 注意：这里不要清 newUid。抽牌后紧接着就会推进回合，
@@ -414,6 +492,160 @@
           break;
       }
     }
+  }
+
+  /* ---------------- 否决回应 ---------------- */
+
+  /** 真人回应 Promise 的 resolve；同一时刻只会有一个窗口 */
+  let nopeAnswer = null;
+  let nopeTick = null;
+
+  function hideNopeBar() {
+    const bar = $('nopeBar');
+    if (bar) bar.classList.remove('show');
+    stopNopeTick();
+  }
+
+  function stopNopeTick() {
+    if (nopeTick) { clearInterval(nopeTick); nopeTick = null; }
+    const timer = $('nopeTimer');
+    if (timer) timer.textContent = '';
+  }
+
+  /** 联机窗口有时限；把剩余秒数写在回应条里，别让条自己突然消失 */
+  function refreshNopeTimer() {
+    const timer = $('nopeTimer');
+    if (!timer) return;
+    const r = App.online && App.online.respond;
+    if (!r || !r.pending || !r.deadline) { timer.textContent = ''; return; }
+    const left = Math.max(0, Math.ceil((r.deadline - Date.now()) / 1000));
+    timer.textContent = left > 0 ? left + ' 秒' : '自动放过';
+  }
+
+  /** 回应条显示条件：桌面与手机共用；单机按引擎的候选窗口，联机按服务器的邀请 */
+  function refreshNopeBar() {
+    const bar = $('nopeBar');
+    if (!bar) return;
+    const state = curState();
+    const pa = state && state.pendingAction;
+    let show = false;
+    if (pa) {
+      if (App.online) show = !!(App.online.respond && App.online.respond.pending) && !App.busy;
+      else show = !!(App.G && Engine.pendingResponder(App.G) === App.humanId);
+    }
+    bar.classList.toggle('show', show);
+
+    if (!show) { stopNopeTick(); return; }
+
+    const actor = state.players[pa.player];
+    const def = CARDS[pa.card.type] || {};
+    const cardName = def.name || pa.card.name || '一张牌';
+    const title = $('nopeTitle');
+    if (title) title.textContent = (actor ? actor.name : '有人') + ' 打出了「' + cardName + '」';
+
+    const sub = $('nopeSub');
+    if (sub) {
+      const n = pa.nopes.length;
+      if (n === 0) {
+        sub.textContent = '你可以用「否决」取消它';
+      } else {
+        const last = pa.nopes[n - 1];
+        const who = state.players[last.player];
+        sub.textContent = (who ? who.name : '有人') + ' 已否决' +
+          (n % 2 === 1 ? '，这张牌不会生效' : '，效果恢复') + '。你可以再否决';
+      }
+    }
+
+    if (App.online) {
+      refreshNopeTimer();
+      if (!nopeTick) nopeTick = setInterval(refreshNopeTimer, 500);
+    } else {
+      stopNopeTick();
+    }
+  }
+
+  /** 等真人点「否决 / 放过」；true = 打出否决 */
+  function askHumanNope() {
+    return new Promise(resolve => {
+      nopeAnswer = resolve;
+      refreshNopeBar();
+    });
+  }
+
+  function answerHumanNope(useNope) {
+    const fn = nopeAnswer;
+    nopeAnswer = null;
+    hideNopeBar();
+    if (fn) fn(!!useNope);
+  }
+
+  /** 重开 / 退出 / 对局作废时收掉回应条，别把旧 Promise 永远挂在空中 */
+  function cancelNopePrompt() {
+    const fn = nopeAnswer;
+    nopeAnswer = null;
+    hideNopeBar();
+    if (fn) fn(false);
+  }
+
+  function humanNopeUid() {
+    const G = App.G;
+    if (!G) return null;
+    const me = G.players[App.humanId];
+    if (!me || !me.hand) return null;
+    const card = me.hand.find(c => c.type === 'nope');
+    return card ? card.uid : null;
+  }
+
+  /**
+   * 单机的否决窗口驱动：按引擎给的候选顺序逐个询问（真人弹条，AI 自己决策），
+   * 直到窗口关闭。返回效果结算后携带的 needsPlacement / exploded。
+   */
+  async function resolvePendingResponses() {
+    const epoch = gameEpoch;
+    const flags = {};
+    let guard = 0;
+
+    while (App.G && App.G.pendingAction && guard++ < 100) {
+      if (epoch !== gameEpoch) return flags;
+      const G = App.G;
+      const pid = Engine.pendingResponder(G);
+      if (pid == null) break;
+
+      let r = null;
+      if (pid === App.humanId) {
+        // 先把 Promise 挂好再 render：回应条可见的那一帧按钮就该是有效的
+        const waiting = askHumanNope();
+        render();
+        const use = await waiting;
+        if (epoch !== gameEpoch) return flags;
+        if (use) {
+          const uid = humanNopeUid();
+          if (uid != null) {
+            r = Engine.respondNope(G, pid, uid);
+            if (r.ok) App.stats.played++;
+          }
+        }
+        if (!r || !r.ok) r = Engine.passResponse(G, pid);
+      } else {
+        render();
+        const p = G.players[pid];
+        View.setPrompt('<b>' + esc(p ? p.name : '对手') + '</b> 正在考虑要不要否决…', false);
+        await delay(420);
+        if (epoch !== gameEpoch) return flags;
+        const uid = AI.chooseNope(G, pid, App.difficulty);
+        if (uid != null) r = Engine.respondNope(G, pid, uid);
+        if (!r || !r.ok) r = Engine.passResponse(G, pid);
+      }
+
+      if (!r || !r.ok) break;      // 理论上不会发生；真发生也不能把流程卡死
+      if (r.needsPlacement) flags.needsPlacement = true;
+      if (r.exploded) flags.exploded = true;
+      await playEvents(r.events || []);
+      if (epoch !== gameEpoch) return flags;
+      render();
+    }
+
+    return flags;
   }
 
   /* ---------------- 回合推进 ---------------- */
@@ -446,16 +678,26 @@
     });
 
     await playEvents(result.events || []);
+
+    // 打出的牌进入否决窗口：所有人的回应处理完，效果才真正结算。
+    // 单机由这里驱动；联机的窗口在服务器，等 update 快照即可。
+    let extra = {};
+    if (!App.online && App.G && App.G.pendingAction) {
+      extra = await resolvePendingResponses();
+    }
+
     App.busy = false;
     render();
-    return result;
+    return Object.assign({}, result, extra);
   }
 
   /** 真人的一次出牌（联机：把动作发给服务器；单机：本地引擎结算） */
   async function humanPlayCard(uid) {
     if (App.online) {
       const moves = App.online.moves || { playable: [], needTarget: [] };
-      const need = moves.needTarget.find(m => m.cardUid === uid);
+      const me = App.online.state && App.online.state.players[App.humanId];
+      const card = me && me.hand ? me.hand.find(c => c.uid === uid) : null;
+      const need = moves.needTarget.find(m => m.cardUid === uid || (card && m.type === card.type));
       if (need) {
         // 需要目标：先选中，等待点击对手（交互与单机一致，只是结算在服务器）
         App.selectedUid = uid;
@@ -482,7 +724,7 @@
       App.awaitingTarget = true;
       render();
       const lm = Engine.legalMoves(G, App.humanId);
-      const hit = lm.needTarget.find(m => m.cardUid === uid);
+      const hit = lm.needTarget.find(m => m.type === card.type);
       View.floater('选择一名对手', 'var(--gold)', { info: true });
       if (!hit || !hit.targets.length) {
         App.awaitingTarget = false;
@@ -494,7 +736,11 @@
 
     // 无需目标：直接结算
     const r = await runAction(() => Engine.playCard(G, App.humanId, uid));
-    if (r && r.needsPlacement) await handlePlacementIfNeeded();
+    if (!r || !r.ok) return;
+    if (r.needsPlacement) { await handlePlacementIfNeeded(); return; }
+    await checkGameOver();
+    // 「摸两张」可能把自己炸出局：若对局继续且回合已交给下家，AI 必须接上
+    if (App.G && App.G.phase === 'playing' && App.G.current !== App.humanId) scheduleAIIfNeeded();
   }
 
   /** 点选对手作为目标 */
@@ -509,13 +755,18 @@
       return;
     }
     const r = await runAction(() => Engine.playCard(App.G, App.humanId, uid, targetId));
-    if (r && r.needsPlacement) await handlePlacementIfNeeded();
+    if (!r || !r.ok) return;
+    if (r.needsPlacement) { await handlePlacementIfNeeded(); return; }
+    await checkGameOver();
+    if (App.G && App.G.phase === 'playing' && App.G.current !== App.humanId) scheduleAIIfNeeded();
   }
 
   /** 真人结束回合（抽牌） */
   async function humanEndTurn() {
+    // 键盘快捷键也会走到这里：瞄准目标、动画中、非本人回合都不该结束回合。
+    // 单机路径原先漏了这道闸，空格/回车能把正在瞄准的回合直接推走。
+    if (!canHumanDraw()) return;
     if (App.online) {
-      if (!canHumanDraw()) return;
       // 点击的一瞬先收掉牌堆的「可抽」光晕（与单机同理：下一次 render 要等动画播完）
       View.setPileDrawable(false);
       App.busy = true;
@@ -671,15 +922,18 @@
 
   /** 炸弹放回之后的收尾：判断是否需要恢复暂停的回合 */
   async function afterPlacement() {
+    const epoch = gameEpoch;
     const G = App.G;
     render();
     if (G.turnEndPending) {
       const owner = App.G.current;
       const r = Engine.resumeAfterPlacement(G, owner);
       if (r.ok) await playEvents(r.events);
+      if (epoch !== gameEpoch) return;   // 期间重开/换局：旧流程到此为止
     }
     render();
     await checkGameOver();
+    if (epoch !== gameEpoch) return;
     scheduleAIIfNeeded();
   }
 
@@ -702,10 +956,10 @@
         const card = me && me.hand ? me.hand.find(c => c.uid === App.selectedUid) : null;
         if (!card) return null;
         const moves = App.online.moves || { playable: [], needTarget: [] };
-        const need = moves.needTarget.find(m => m.cardUid === card.uid);
+        const need = moves.needTarget.find(m => m.type === card.type);
         return {
           card,
-          canPlay: moves.playable.some(m => m.cardUid === card.uid),
+          canPlay: moves.playable.some(m => m.type === card.type),
           needTarget: !!need,
           targets: need ? need.targets : null,
           readonly: false
@@ -723,8 +977,8 @@
       const card = me && me.hand ? me.hand.find(c => c.uid === App.selectedUid) : null;
       if (!card) return null;
       const lm = Engine.legalMoves(G, App.humanId);
-      const canPlay = lm.playable.some(m => m.cardUid === card.uid);
-      const need = lm.needTarget.find(m => m.cardUid === card.uid);
+      const canPlay = lm.playable.some(m => m.type === card.type);
+      const need = lm.needTarget.find(m => m.type === card.type);
       return { card, canPlay, needTarget: !!need, targets: need ? need.targets : null, readonly: false };
     }
     if (discardInspect) return { card: discardInspect, canPlay: false, needTarget: false, targets: null, readonly: true };
@@ -767,7 +1021,10 @@
       col.className = 't-col';
       const nm = document.createElement('span');
       nm.className = 't-name';
-      nm.textContent = p.name;
+      // 头像已经表明这是 AI，按钮里去掉重复的「AI 」前缀，窄屏才放得下名字
+      nm.textContent = p.name.replace(/^AI\s+/i, '');
+      b.title = p.name;
+      b.setAttribute('aria-label', '选择 ' + p.name);
       const cnt = document.createElement('span');
       cnt.className = 't-count';
       cnt.textContent = p.handSize + ' 张';
@@ -965,6 +1222,8 @@
     panel.classList.remove('hidden');
     panel.classList.add('drawer', 'show');
     mask.classList.add('show');
+    const btn = $('btnLogDrawer');
+    if (btn) btn.classList.add('on');
   }
 
   /** 关闭日志抽屉：滑出动画结束后再摘掉 drawer 类（否则会瞬间跳回桌面浮层样式） */
@@ -973,6 +1232,8 @@
     const mask = $('logMask');
     logDrawerOpen = false;
     if (mask) mask.classList.remove('show');
+    const btn = $('btnLogDrawer');
+    if (btn) btn.classList.remove('on');
     if (!panel) return;
     panel.classList.remove('show');
     setTimeout(() => {
@@ -983,12 +1244,23 @@
   /* ---------------- AI 驱动 ---------------- */
 
   let aiTimer = null;
+  // 对局代次：重开 / 开新局时自增，用来作废旧对局还在 await 中的 AI 驱动。
+  // 只清 setTimeout 拦不住已经跑到一半的 driveAI（它会在 await 之后继续出牌）。
+  let gameEpoch = 0;
+
+  /** 中止当前对局的 AI 计时器与在途驱动（打开重开面板 / 开新局时调用） */
+  function stopGameLoop() {
+    gameEpoch++;
+    clearTimeout(aiTimer);
+    aiTimer = null;
+    cancelNopePrompt();
+  }
 
   function scheduleAIIfNeeded() {
     if (App.online) return;              // 联机没有 AI，回合推进全在服务器
     const G = App.G;
     if (!G || G.phase !== 'playing') return;
-    if (G.pendingBomb) return;
+    if (G.pendingBomb || G.pendingAction) return;
     const cur = G.players[G.current];
     if (!cur || !cur.isAI) return;
     clearTimeout(aiTimer);
@@ -996,6 +1268,7 @@
   }
 
   async function driveAI() {
+    const epoch = gameEpoch;
     const G = App.G;
     if (App.online) return;              // 联机没有 AI
     if (!G || G.phase !== 'playing' || App.busy) return;
@@ -1004,28 +1277,29 @@
     const p = G.players[pid];
     if (!p || !p.isAI) return;
 
-    // 1) 待放回的炸弹
+    // 1) 待放回的炸弹（属于当前 AI；真人路径在 handlePlacementIfNeeded 里等点击）
     if (G.pendingBomb) {
-      if (G.pendingBomb.player === pid || true) {
-        const owner = G.pendingBomb.player;
-        const pos = AI.chooseBombPosition(G, owner, App.difficulty);
-        const r = Engine.placeBomb(G, owner, pos);
-        if (r.ok) await playEvents(r.events);
-        await afterPlacement();
-      }
+      const owner = G.pendingBomb.player;
+      if (owner === App.humanId) return;
+      const pos = AI.chooseBombPosition(G, owner, App.difficulty);
+      const r = Engine.placeBomb(G, owner, pos);
+      if (r.ok) await playEvents(r.events);
+      await afterPlacement();
       return;
     }
 
     App.busy = true;
-    View.setPrompt('<b>' + p.name + '</b> 思考中…', false);
+    View.setPrompt('<b>' + esc(p.name) + '</b> 思考中…', false);
 
     try {
       // 2) 出牌决策（最多连续出 2 张，保持节奏）
       let played = 0;
       const maxPlay = App.difficulty === 'hard' ? 2 : 1;
 
-      while (played < maxPlay && G.phase === 'playing' && G.current === pid && !G.pendingBomb) {
+      while (played < maxPlay && G.phase === 'playing' && G.current === pid &&
+             !G.pendingBomb && !G.pendingAction) {
         await delay(340);
+        if (epoch !== gameEpoch) return;
         const pick = AI.chooseCard(G, pid, App.difficulty);
         if (!pick) break;
 
@@ -1034,21 +1308,42 @@
         if (!r.ok) break;
 
         await playEvents(r.events || []);
+        if (epoch !== gameEpoch) return;
         played++;
+
+        // 打出的牌进入否决窗口：按席位询问，窗口关掉才真正结算效果
+        let extra = {};
+        if (G.pendingAction) {
+          extra = await resolvePendingResponses();
+          if (epoch !== gameEpoch) return;
+        }
         render();
 
-        if (r.needsPlacement) {
+        if ((extra && extra.needsPlacement) || G.pendingBomb) {
           App.busy = false;
           await handlePlacementIfNeeded();
           return;
         }
         if (G.phase === 'over') break;
+        // 摸两张把自己炸出局、或效果把回合交了出去：别再按旧回合继续
+        if (G.current !== pid) break;
       }
 
       if (G.phase === 'over') { App.busy = false; render(); await checkGameOver(); return; }
 
+      // 出牌效果改变了回合（例如自己出局）：直接交给下一位，不能再用旧 pid 结束回合
+      if (G.current !== pid) {
+        App.busy = false;
+        render();
+        await checkGameOver();
+        if (epoch !== gameEpoch) return;
+        scheduleAIIfNeeded();
+        return;
+      }
+
       // 3) 结束回合（抽牌）
       await delay(300);
+      if (epoch !== gameEpoch) return;
       const r = Engine.endTurn(G, pid);
       if (!r.ok) {
         App.busy = false;
@@ -1056,14 +1351,17 @@
         return;
       }
       await playEvents(r.events || []);
+      if (epoch !== gameEpoch) return;
       App.busy = false;
       render();
 
       if (r.needsPlacement) { await handlePlacementIfNeeded(); return; }
       await checkGameOver();
+      if (epoch !== gameEpoch) return;
       scheduleAIIfNeeded();
     } catch (err) {
       console.error('[AI]', err);
+      if (epoch !== gameEpoch) return;
       App.busy = false;
       render();
     }
@@ -1163,6 +1461,7 @@
     const count = parseInt($('setupPlayers').dataset.value || '4', 10);
     const names = readNames(count);
 
+    stopGameLoop();             // 旧对局的 AI 计时器 / 在途驱动全部作废
     App.humanId = 0;
     App.selectedUid = null;
     App.selectedAt = 0;
@@ -1346,6 +1645,18 @@
       humanEndTurn();
     });
 
+    // 否决回应条：单机走本地窗口，联机把回应发给服务器
+    $('btnNope').addEventListener('click', () => {
+      if (App.online) { netAnswerNope(true); return; }
+      if (!nopeAnswer) return;
+      answerHumanNope(true);
+    });
+    $('btnNopePass').addEventListener('click', () => {
+      if (App.online) { netAnswerNope(false); return; }
+      if (!nopeAnswer) return;
+      answerHumanNope(false);
+    });
+
     // 牌堆：常驻点击 = 直接抽牌。
     // 不满足条件时静默返回；炸弹放回模式下 G.pendingBomb 为真，这里必然让开，
     // 点击交给 enableBombPlacement() 的临时监听器处理——两套逻辑不会同时触发。
@@ -1379,13 +1690,15 @@
       );
     });
 
-    // 重开
+    // 重开：打开设置面板即视为放弃当前对局，先停掉后台 AI，别让它在面板后面继续打
     $('btnRestart').addEventListener('click', () => {
+      stopGameLoop();
       if (App.online) { leaveOnline(); applySetupMode('local'); }
       View.hideModal('modalResult');
       View.showModal('modalSetup');
     });
     $('btnAgain').addEventListener('click', () => {
+      stopGameLoop();
       if (App.online) { leaveOnline(); applySetupMode('local'); }
       View.hideModal('modalResult');
       View.showModal('modalSetup');
@@ -1461,21 +1774,29 @@
       if (App.soundOn) SFX.click();
     });
 
-    // 日志面板开关（桌面：右下角浮层；手机：抽屉的关闭按钮也走这里）
+    // 日志面板开关
     $('btnLog').addEventListener('click', () => {
       if (logDrawerOpen) { closeLogDrawer(); return; }
       View.el.logPanel.classList.add('hidden');
-      $('btnLogToggle').style.display = 'block';
+      $('btnLogDrawer').classList.remove('on');
     });
     $('btnLogToggle').addEventListener('click', () => {
       View.el.logPanel.classList.remove('hidden');
       $('btnLogToggle').style.display = 'none';
+      $('btnLogDrawer').classList.add('on');
     });
 
-    // 手机端：顶栏日志按钮 + 遮罩点击
+    // 顶栏日志按钮：窄屏打开抽屉，桌面直接切换右下角浮层面板
     $('btnLogDrawer').addEventListener('click', () => {
-      if (logDrawerOpen) closeLogDrawer();
-      else openLogDrawer();
+      const narrow = root.matchMedia && root.matchMedia('(max-width: 620px)').matches;
+      if (narrow) {
+        if (logDrawerOpen) closeLogDrawer();
+        else openLogDrawer();
+        return;
+      }
+      const panel = View.el.logPanel;
+      const nowHidden = panel.classList.toggle('hidden');
+      $('btnLogDrawer').classList.toggle('on', !nowHidden);
     });
     $('logMask').addEventListener('click', () => {
       if (logDrawerOpen) closeLogDrawer();
@@ -1541,11 +1862,13 @@
     if (placeParts) {
       placeParts.slots.forEach(btn => {
         btn.addEventListener('click', () => {
-          const G = App.G;
-          if (!G || !G.pendingBomb || G.pendingBomb.player !== App.humanId) return;
+          // 联机局没有本地 App.G，状态与牌堆张数都必须走 curState / curDeckSize，
+          // 否则手机端在「炸弹放回哪里」阶段点任何档位都没有反应（软锁）。
+          const st = curState();
+          if (!st || !st.pendingBomb || st.pendingBomb.player !== App.humanId) return;
           if (btn.disabled) return;
           const slot = parseInt(btn.dataset.slot, 10);
-          const deck = G.deck.length;
+          const deck = curDeckSize();
           placePos = slotToPos(slot, deck);
           const ratio = slot >= 6
             ? 1
@@ -1556,8 +1879,8 @@
       });
       if (placeParts.ok) {
         placeParts.ok.addEventListener('click', () => {
-          const G = App.G;
-          if (!G || !G.pendingBomb || G.pendingBomb.player !== App.humanId) return;
+          const st = curState();
+          if (!st || !st.pendingBomb || st.pendingBomb.player !== App.humanId) return;
           if (placePos == null) return;
           commitPlacement(placePos);
         });
@@ -1574,8 +1897,13 @@
         render();
       }
       if (ev.key === ' ' || ev.key === 'Enter') {
+        if (ev.repeat || ev.ctrlKey || ev.metaKey || ev.altKey) return;
+        // 焦点在按钮/输入控件上时交给控件自身的键盘行为：
+        // 否则回车点「提示」的同时也会把回合结束掉，结束按钮还会被触发两次
+        const tag = (document.activeElement && document.activeElement.tagName) || '';
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || tag === 'BUTTON') return;
         const btn = $('btnEnd');
-        if (!btn.disabled && document.activeElement.tagName !== 'INPUT') {
+        if (!btn.disabled) {
           ev.preventDefault();
           humanEndTurn();
         }
@@ -1591,6 +1919,19 @@
 
   function netSend(msg) {
     return !!(App.online && App.online.conn && App.online.conn.send(msg));
+  }
+
+  /** 联机回应否决窗口：只发「否决 / 放过」，具体用哪张牌由服务器校验 */
+  function netAnswerNope(useNope) {
+    const r = App.online && App.online.respond;
+    if (!r || !r.pending) return;
+    App.online.respond = null;
+    hideNopeBar();
+    App.busy = true;
+    if (!netSend({ t: 'respond', nope: !!useNope })) {
+      App.busy = false;
+      View.floater('连接已断开，正在重连…', 'var(--red-2)', { info: true });
+    }
   }
 
   function netSaveSession() {
@@ -1628,6 +1969,8 @@
       }),
       code: null, seat: null, token: null, name: '',
       state: null, moves: null, host: false,
+      respond: null,          // 服务器打开的否决回应窗口 { pending, deadline, seq }
+      msgSeq: 0,              // 本次连接的收包序号，用来判断回应窗口是否已被新快照作废
       pendingOpen: [action]
     };
   }
@@ -1645,6 +1988,7 @@
 
   function onNetMsg(msg) {
     if (!msg || !msg.t) return;
+    const seq = App.online ? (App.online.msgSeq = (App.online.msgSeq || 0) + 1) : 0;
     switch (msg.t) {
       case 'created':
       case 'joined':
@@ -1667,7 +2011,13 @@
         enterOnlineGame(msg.state, msg.moves);
         break;
       case 'update':
-        onNetUpdate(msg);
+        onNetUpdate(msg, seq);
+        break;
+      case 'respond':
+        if (!App.online) return;
+        App.online.respond = { pending: true, deadline: Number(msg.deadline) || 0, seq: seq };
+        // 动画还在播时先记下，等 update 队列排空后的 render 再亮出回应条
+        if (!App.busy) render();
         break;
       case 'err':
         if (msg.fatal) { netFail(msg.msg); return; }
@@ -1699,8 +2049,9 @@
    * 服务器 update：先换快照再播事件（与离线 runAction 同序）。
    * 动画期间别人的动作可能继续到达 → 排队串行播，保证事件顺序不被打乱。
    */
-  function onNetUpdate(msg) {
+  function onNetUpdate(msg, seq) {
     if (!App.online) return;
+    msg._seq = seq;
     netQueue.push(msg);
     if (netDraining) return;
     netDraining = true;
@@ -1710,11 +2061,19 @@
   async function drainNetQueue() {
     while (netQueue.length && App.online) {
       const m = netQueue.shift();
+      // 新快照意味着上一轮回应已经结束；旧的回应条不能跨回合残留。
+      // 但服务器是先广播 update 再私发 respond，update 可能在动画期间排队：
+      // 等它出队时，更新的 respond 可能已经到了，不能把它一起清掉。
+      const rsp = App.online.respond;
+      if (!rsp || (rsp.seq || 0) < (m._seq || 0)) {
+        App.online.respond = null;
+        hideNopeBar();
+      }
       App.online.state = m.state;
       App.online.moves = m.moves;
-      // 统计本人出牌数（离线在 runAction 里数，联机从事件流里数）
+      // 统计本人出牌数（离线在 runAction 里数，联机从事件流里数；否决也算一张）
       (m.events || []).forEach(e => {
-        if (e.type === 'play' && e.player === App.humanId) App.stats.played++;
+        if ((e.type === 'play' || e.type === 'nope') && e.player === App.humanId) App.stats.played++;
       });
       App.busy = true;
       await playEvents(m.events || []);
@@ -1736,6 +2095,8 @@
     App.humanId = state.you != null ? state.you : App.online.seat;
     App.online.state = state;
     App.online.moves = moves;
+    App.online.respond = null;
+    cancelNopePrompt();
     App.selectedUid = null;
     App.selectedAt = 0;
     App.newUid = null;
@@ -1758,6 +2119,7 @@
   /** 彻底退出联机：断连接、清凭据、清本地状态 */
   function leaveOnline() {
     netClearSession();
+    cancelNopePrompt();
     if (App.online && App.online.conn) App.online.conn.close();
     App.online = null;
     App.humanId = 0;
@@ -1890,6 +2252,9 @@
   // 放炸弹相关：探针 / 桩脚本要直接验证「看到的位置 == 放回的位置」
   App.posFromEvent = posFromEvent;
   App.enableBombPlacement = enableBombPlacement;
+  App.playEvents = playEvents;
+  App.resolvePendingResponses = resolvePendingResponses;
+  App.netReceive = onNetMsg;
 
   root.BombCats = Object.assign(root.BombCats || {}, { App });
 })(typeof window !== 'undefined' ? window : globalThis);

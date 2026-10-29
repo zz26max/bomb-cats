@@ -37,9 +37,8 @@
     <div class="spacer"></div>
 
     <div class="deck-info">
-      <span>牌堆 <b id="deckCount">0</b></span>
-      <span class="bomb-mark" id="bombCount" title="本局牌堆里的炸弹猫总数"><svg class="ic" aria-hidden="true"><use href="#ic-bomb"></use></svg><b id="bombTotal">0</b></span>
-      <span>回合 <b id="seedLabel">0</b></span>
+      <span class="stat"><span class="k">牌堆</span><b id="deckCount">0</b></span>
+      <span class="stat bomb-mark" id="bombCount" title="本局牌堆里的炸弹猫总数"><svg class="ic" aria-hidden="true"><use href="#ic-bomb"></use></svg><span class="k">炸弹</span><b id="bombTotal">0</b></span>
     </div>
 
     <button class="btn icon" id="btnSound" title="音效开关"><svg class="ic" aria-hidden="true"><use href="#ic-sound-on"></use></svg></button>
@@ -56,6 +55,8 @@
 
     <!-- 中央舞台 -->
     <section class="stage">
+      <div class="round-chip" aria-label="回合"><span>第</span><b id="seedLabel">0</b><span>回合</span></div>
+
       <div class="piles">
         <!-- 牌堆 -->
         <div class="pile">
@@ -68,6 +69,7 @@
             </div>
           </div>
           <span class="label">牌堆</span>
+          <span class="draw-cue">点击抽牌</span>
         </div>
 
         <!-- 弃牌堆 -->
@@ -84,6 +86,21 @@
       </div>
 
       <div class="prompt" id="prompt">准备开始…</div>
+
+      <!-- 否决回应条：上一张牌等待结算、且轮到你决定要不要打断时出现 -->
+      <div class="nope-bar" id="nopeBar" role="dialog" aria-label="是否使用否决">
+        <div class="nb-copy">
+          <div class="nb-title" id="nopeTitle">有人打出了一张牌</div>
+          <div class="nb-sub">
+            <span id="nopeSub">要用否决打断吗？</span>
+            <span class="nb-timer" id="nopeTimer"></span>
+          </div>
+        </div>
+        <div class="nb-actions">
+          <button class="btn small" type="button" id="btnNopePass">放过</button>
+          <button class="btn danger small" type="button" id="btnNope">否决</button>
+        </div>
+      </div>
 
       <!-- 说明条（触摸端：选中手牌 / 弃牌堆顶 / 选目标）；桌面不显示 -->
       <div class="inspect" id="inspect">
@@ -106,16 +123,18 @@
 
     <!-- 手牌与操作 -->
     <section class="handzone">
-      <div class="myplate" id="myPlate">
-        <img class="plate-cat" src="assets/cats/cat-01.webp" alt="">
-        <span class="nm">你</span>
-        <span class="tag">等待中</span>
-      </div>
       <div class="hand" id="hand"></div>
       <div class="actions">
+        <div class="myplate" id="myPlate">
+          <img class="plate-cat" src="assets/cats/cat-01.webp" alt="">
+          <span class="nm">你</span>
+          <span class="tag">等待中</span>
+        </div>
         <span class="hand-count" id="handCount">0 张</span>
-        <button class="btn icon-text" id="btnHint"><svg class="ic" aria-hidden="true"><use href="#ic-hint"></use></svg><span>提示</span></button>
-        <button class="btn primary icon-text" id="btnEnd"><svg class="ic" aria-hidden="true"><use href="#ic-endturn"></use></svg><span>结束回合 · 抽牌</span></button>
+        <div class="action-btns">
+          <button class="btn icon-text" id="btnHint"><svg class="ic" aria-hidden="true"><use href="#ic-hint"></use></svg><span>提示</span></button>
+          <button class="btn primary icon-text" id="btnEnd"><svg class="ic" aria-hidden="true"><use href="#ic-endturn"></use></svg><span>结束回合 · 抽牌</span></button>
+        </div>
       </div>
 
       <!-- 炸弹放回位置选择条（触摸 / 窄屏的放置状态）；桌面不显示 -->
@@ -136,8 +155,8 @@
   </main>
 </div>
 
-<!-- ============ 日志面板 ============ -->
-<aside class="logpanel" id="logPanel">
+<!-- ============ 日志面板（默认折叠，避免长期占据桌面） ============ -->
+<aside class="logpanel hidden" id="logPanel">
   <div class="head">
     <span>对局日志</span>
     <span class="spacer"></span>
@@ -147,12 +166,14 @@
 </aside>
 <!-- 手机端日志抽屉的半透明遮罩（桌面不显示） -->
 <div class="log-mask" id="logMask"></div>
-<button class="btn log-toggle icon-text" id="btnLogToggle" style="display:none"><svg class="ic" aria-hidden="true"><use href="#ic-log"></use></svg><span>日志</span></button>
+<button class="btn log-toggle icon-text" id="btnLogToggle"><svg class="ic" aria-hidden="true"><use href="#ic-log"></use></svg><span>日志</span></button>
 
 <!-- ============ 开局设置 ============ -->
 <div class="modal-mask" id="modalSetup">
   <div class="modal">
-    <img class="modal-banner" src="assets/art/banner.webp" alt="炸弹猫">
+    <div class="modal-hero">
+      <img class="modal-banner" src="assets/art/banner.webp" alt="炸弹猫">
+    </div>
     <p class="sub">轮流出牌、抽牌，抽到炸弹猫又没有「拆除」就出局。活到最后的人获胜。</p>
 
     <div class="field">
@@ -215,6 +236,10 @@
       <p class="net-hint">把房间码告诉朋友，他们在同一页面点「加入」即可。</p>
     </div>
 
+    <div class="modal-actions" style="margin-top:16px">
+      <button class="btn primary" id="btnStart" style="flex:1">开始对局</button>
+    </div>
+
     <details class="rules">
       <summary>怎么看懂这局牌</summary>
       <div class="body">
@@ -224,14 +249,10 @@
         <b>攻击</b>：让下家连抽 2 张，是逼人送命的主力。<br>
         <b>跳过</b>：这回合不抽牌，风险高时的保命牌。<br>
         <b>求饶 / 帮忙</b>：从对手手里抢一张牌，但对方只剩 1 张时不能抢。<br>
-        <b>否决</b>：取消上一张打出的牌。<br>
+        <b>否决</b>：取消刚打出的牌；别人也能再否决它，奇数次失效、偶数次照常生效。<br>
         <b>洗牌</b>：重洗牌堆，会把自己记住的顶牌信息一并洗掉。
       </div>
     </details>
-
-    <div class="modal-actions" style="margin-top:18px">
-      <button class="btn primary" id="btnStart" style="flex:1">开始对局</button>
-    </div>
   </div>
 </div>
 
